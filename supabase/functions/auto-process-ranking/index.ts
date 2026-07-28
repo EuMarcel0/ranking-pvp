@@ -1,8 +1,8 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { syncCharactersFromVortex } from '../_shared/vortexSync.ts';
 
-/** Minutos sem kill no mapa do evento para considerar o PvP encerrado */
-const EVENT_IDLE_MINUTES = 7;
+/** Minutos sem kill no mapa do evento (logs_pvp) para considerar o PvP encerrado */
+const EVENT_IDLE_MINUTES = 5;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -57,20 +57,19 @@ function brtNowMs(): number {
 }
 
 function parseLogTimestampMs(log: ExternalLogEntry): number | null {
-  const raw = log.timestamp?.trim();
-  if (raw) {
-    const match = raw.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
-    if (match) {
-      const [, year, month, day, hour, minute, second] = match;
-      // DB externo armazena horário local BRT (UTC-3)
-      return Date.UTC(+year, +month - 1, +day, +hour, +minute, +second) + 3 * 3600000;
-    }
+  // Preferir horário exato do content (`DD/MM/YYYY HH:MM:SS`) — mesma origem do discord-worker
+  const contentMatch = log.content?.match(/`?(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})`?/);
+  if (contentMatch) {
+    const [, day, month, year, hour, minute, second] = contentMatch;
+    return Date.UTC(+year, +month - 1, +day, +hour, +minute, +second) + 3 * 3600000;
   }
 
-  const contentMatch = log.content?.match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})/);
-  if (!contentMatch) return null;
-
-  const [, day, month, year, hour, minute, second] = contentMatch;
+  const raw = log.timestamp?.trim();
+  if (!raw) return null;
+  const match = raw.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second] = match;
+  // logs_pvp.timestamp guarda horário local BRT (sem timezone)
   return Date.UTC(+year, +month - 1, +day, +hour, +minute, +second) + 3 * 3600000;
 }
 
