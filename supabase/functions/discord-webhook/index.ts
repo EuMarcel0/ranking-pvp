@@ -591,7 +591,7 @@ serve(async (req) => {
         color: 0xDC2626
       };
 
-      const frontendUrl = 'https://rankingpvpboss.lovable.app';
+      const frontendUrl = (Deno.env.get('FRONTEND_URL') || 'https://rankingpvpboss.lovable.app').replace(/\/+$/, '');
       const embed3 = {
         description: `🔗 **[Ver ranking completo no site](${frontendUrl}/?tab=fogo-amigo)**`,
         color: 0x9b87f5
@@ -621,7 +621,7 @@ serve(async (req) => {
         color: 0xEF4444
       };
 
-      const frontendUrl = 'https://rankingpvpboss.lovable.app';
+      const frontendUrl = (Deno.env.get('FRONTEND_URL') || 'https://rankingpvpboss.lovable.app').replace(/\/+$/, '');
       const embed3 = {
         description: `🔗 **[Ver ranking completo no site](${frontendUrl}/?tab=putinha)**`,
         color: 0x9b87f5

@@ -6,8 +6,8 @@ SELECT cron.schedule(
   '* * * * *',
   $$
   SELECT net.http_post(
-    url := 'https://piwvrencvdgngruhuxqw.supabase.co/functions/v1/kill-activity-watchdog',
-    headers := '{"Content-Type":"application/json","Authorization":"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpd3ZyZW5jdmRnbmdydWh1eHF3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwNTEzMzIsImV4cCI6MjA3NTYyNzMzMn0.iRZFTpNsEFPwGUNRnHCYOlU78kDybCsvgkM8xLCHYlM"}'::jsonb,
+    url := 'https://egupwrwzcuqazlshhfoq.supabase.co/functions/v1/kill-activity-watchdog',
+    headers := '{"Content-Type":"application/json","Authorization":"Bearer sb_publishable_fVUYQHFh7AZVM4TtGTZ_iQ_doLJzMqQ"}'::jsonb,
     body := '{"trigger":"cron"}'::jsonb
   ) AS request_id;
   $$
