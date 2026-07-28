@@ -1,0 +1,1 @@
+ALTER VIEW public.v_friendly_fire_per_match SET (security_invoker = true);

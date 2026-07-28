@@ -1,0 +1,1 @@
+ALTER TABLE public.pvp_matches ADD COLUMN IF NOT EXISTS winner_guild text;

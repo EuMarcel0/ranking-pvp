@@ -1,0 +1,1 @@
+ALTER TABLE public.characters ADD COLUMN pilot_name text NOT NULL DEFAULT '';

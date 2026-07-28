@@ -1,0 +1,1 @@
+SELECT cron.unschedule('kill-activity-watchdog-every-minute');

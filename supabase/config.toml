@@ -1,0 +1,13 @@
+project_id = "piwvrencvdgngruhuxqw"
+
+[functions.auto-process-ranking]
+verify_jwt = false
+
+[functions.sync-characters-vortex]
+verify_jwt = false
+
+[functions.pvp-ai-insights]
+verify_jwt = false
+
+[functions.kill-activity-watchdog]
+verify_jwt = false

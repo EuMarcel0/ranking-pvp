@@ -1,0 +1,9 @@
+# Ranking de Kill - PVP BOSS
+
+> Painel público de ranking PvP do servidor: kills, deaths, KDA e score por jogador, classe e guild, com cobertura de Boss, Throne Conquest e Arka War.
+
+O site agrega partidas do servidor e expõe rankings em tempo real, comparações entre classes/guilds, históricos por temporada (Hall da Fama), conquistas/marcos por jogador e análises avançadas (Team Builder, classe x classe, fogo amigo).
+
+## Páginas
+
+- [Ranking principal](/): Ranking geral, Throne Conquest, Arka War, Reis do PvP, Kill Streak, Mural da Vergonha, Confrontos Diretos, Hall da Fama e Analytics.
