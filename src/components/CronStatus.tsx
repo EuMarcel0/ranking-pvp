@@ -21,7 +21,7 @@ interface CronStatusData {
   runs?: CronRun[];
 }
 
-const JOB_NAME = 'kill-activity-watchdog-every-minute';
+const JOB_NAME = 'boss-kill-detector-every-minute';
 
 export const CronStatus = () => {
   const [data, setData] = useState<CronStatusData | null>(null);
@@ -51,7 +51,7 @@ export const CronStatus = () => {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold text-foreground">Status do Cron — Watchdog</h2>
+        <h2 className="text-2xl font-bold text-foreground">Status do Cron — Detector de Boss Kill</h2>
         <Button onClick={fetchStatus} disabled={loading} size="sm" variant="outline" className="gap-2">
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           Atualizar

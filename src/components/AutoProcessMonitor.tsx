@@ -12,12 +12,15 @@ import { Activity, CheckCircle2, Clock, AlertCircle, RefreshCw, Calendar, Users,
 import { format, formatDistanceToNow, parseISO, isToday, isYesterday, subDays } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { useToast } from '@/hooks/use-toast';
+import { bossNpcLabel } from '@/utils/bossNpcs';
 
 interface MatchData {
   id: string;
   match_date: string;
   match_hour: number;
   boss_label: string;
+  boss_killer?: string | null;
+  boss_npc_id?: number | null;
   created_at: string;
   event_type: string;
   player_count?: number;
@@ -52,12 +55,13 @@ export const AutoProcessMonitor = () => {
   const [manualThroneEndHour, setManualThroneEndHour] = useState(22);
   const [manualThroneEndMinute, setManualThroneEndMinute] = useState(40);
   const [manualSyncing, setManualSyncing] = useState(false);
+  const [detectingBoss, setDetectingBoss] = useState(false);
 
   const fetchRecentMatches = async () => {
     try {
       const { data: matches, error } = await supabase
         .from('pvp_matches')
-        .select('id, match_date, match_hour, boss_label, created_at, event_type')
+        .select('id, match_date, match_hour, boss_label, boss_killer, boss_npc_id, created_at, event_type')
         .order('created_at', { ascending: false })
         .limit(21);
 
@@ -132,6 +136,40 @@ export const AutoProcessMonitor = () => {
       });
     } finally {
       setProcessingEvent(null);
+    }
+  };
+
+  const handleRunBossDetector = async () => {
+    setDetectingBoss(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('detect-boss-kill', {
+        body: { trigger: 'manual' },
+      });
+      if (error) throw error;
+
+      if (data?.triggered) {
+        toast({
+          title: 'Boss kill detectado e postado!',
+          description: `${data.triggered.killer} — ${bossNpcLabel(data.triggered.npcId) ?? 'Boss'} — ${data.triggered.process?.playerCount ?? '?'} jogadores.`,
+        });
+        await fetchRecentMatches();
+      } else {
+        toast({
+          title: 'Detector executado',
+          description: data?.window
+            ? `Janela ativa ${data.window.hour}:${String(data.window.minute).padStart(2, '0')} — nenhum +1 nos NPCs 968/966.`
+            : 'Fora da janela de Boss Event (baseline atualizado se necessário).',
+        });
+      }
+    } catch (error) {
+      console.error('[BossDetector] Erro:', error);
+      toast({
+        title: 'Erro no detector',
+        description: error instanceof Error ? error.message : 'Erro desconhecido',
+        variant: 'destructive',
+      });
+    } finally {
+      setDetectingBoss(false);
     }
   };
 
@@ -342,13 +380,28 @@ export const AutoProcessMonitor = () => {
             <Activity className="w-6 h-6 text-primary" />
             <div>
               <CardTitle>Monitoramento de Processamento Automático</CardTitle>
-              <CardDescription className="mt-1">Status dos últimos rankings processados automaticamente</CardDescription>
+              <CardDescription className="mt-1">
+                Boss Event automático via detector de killer (NPC 968/966). Crons/watchdog antigos desativados.
+              </CardDescription>
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing} className="gap-2">
-            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-            Atualizar
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleRunBossDetector}
+              disabled={detectingBoss}
+              className="gap-2"
+              title="Consulta NPCs 968/966 no VortexMU e, se houver +1 kill, sincroniza e posta"
+            >
+              {detectingBoss ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
+              {detectingBoss ? 'Detectando...' : 'Rodar detector'}
+            </Button>
+            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing} className="gap-2">
+              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+              Atualizar
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent>
@@ -470,6 +523,7 @@ export const AutoProcessMonitor = () => {
             const isProcessing = processingEvent === eventKey;
             const canProcess = canManuallyProcess(event);
             const isThrone = event.eventType === 'throne_conquest';
+            const killerBossName = match ? bossNpcLabel(match.boss_npc_id) : null;
 
             return (
               <div
@@ -500,9 +554,15 @@ export const AutoProcessMonitor = () => {
                       </Badge>
                     </div>
                     {match && (
-                      <div className="text-sm text-muted-foreground mt-1 flex items-center gap-2">
+                      <div className="text-sm text-muted-foreground mt-1 flex items-center gap-2 flex-wrap">
                         <Users className="w-3 h-3" />
                         {match.player_count} jogadores • {formatProcessingDelay(event, match)}
+                        {match.boss_killer && (
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            • 🐉 {match.boss_killer}
+                            {killerBossName ? ` — ${killerBossName}` : ''}
+                          </span>
+                        )}
                       </div>
                     )}
                   </div>

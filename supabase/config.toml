@@ -11,3 +11,6 @@ verify_jwt = false
 
 [functions.kill-activity-watchdog]
 verify_jwt = false
+
+[functions.detect-boss-kill]
+verify_jwt = false

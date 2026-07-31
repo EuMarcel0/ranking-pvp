@@ -276,6 +276,8 @@ export type Database = {
       pvp_matches: {
         Row: {
           boss_label: string
+          boss_killer: string | null
+          boss_npc_id: number | null
           created_at: string
           event_type: string
           id: string
@@ -286,6 +288,8 @@ export type Database = {
         }
         Insert: {
           boss_label: string
+          boss_killer?: string | null
+          boss_npc_id?: number | null
           created_at?: string
           event_type?: string
           id?: string
@@ -296,6 +300,8 @@ export type Database = {
         }
         Update: {
           boss_label?: string
+          boss_killer?: string | null
+          boss_npc_id?: number | null
           created_at?: string
           event_type?: string
           id?: string
@@ -303,6 +309,60 @@ export type Database = {
           match_hour?: number
           match_minute?: number
           winner_guild?: string | null
+        }
+        Relationships: []
+      }
+      monster_kill_baselines: {
+        Row: {
+          npc_id: number
+          character_name: string
+          kill_count: number
+          updated_at: string
+        }
+        Insert: {
+          npc_id: number
+          character_name: string
+          kill_count?: number
+          updated_at?: string
+        }
+        Update: {
+          npc_id?: number
+          character_name?: string
+          kill_count?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      boss_kill_triggers: {
+        Row: {
+          id: string
+          match_date: string
+          match_hour: number
+          match_minute: number
+          event_type: string
+          npc_id: number
+          killer_name: string
+          triggered_at: string
+        }
+        Insert: {
+          id?: string
+          match_date: string
+          match_hour: number
+          match_minute?: number
+          event_type?: string
+          npc_id: number
+          killer_name: string
+          triggered_at?: string
+        }
+        Update: {
+          id?: string
+          match_date?: string
+          match_hour?: number
+          match_minute?: number
+          event_type?: string
+          npc_id?: number
+          killer_name?: string
+          triggered_at?: string
         }
         Relationships: []
       }

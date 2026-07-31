@@ -53,6 +53,19 @@ interface RequestBody {
   eventType?: 'boss_event' | 'throne_conquest';
   testHomolog?: boolean;
   eventDate?: string; // 'YYYY-MM-DD' force a specific date (for homolog testing)
+  /** Killer do boss (NPC 968/966) — preenchido pelo detect-boss-kill */
+  bossKiller?: string;
+  bossNpcId?: number;
+}
+
+const BOSS_NPC_NAMES: Record<number, string> = {
+  966: '(Elite) Devil Sword',
+  968: '(Elite) Devil Sorcerer',
+};
+
+function bossNpcLabel(npcId: number | null | undefined): string | null {
+  if (npcId == null) return null;
+  return BOSS_NPC_NAMES[npcId] ?? `NPC ${npcId}`;
 }
 
 function brtNowMs(): number {
@@ -705,6 +718,15 @@ Deno.serve(async (req) => {
       ? `Throne ${matchDate} ${matchHour}H`
       : `BOSSx2 ${matchDate} ${matchHour}H`);
 
+    const bossKiller =
+      typeof body.bossKiller === 'string' && body.bossKiller.trim()
+        ? body.bossKiller.trim()
+        : null;
+    const bossNpcId =
+      typeof body.bossNpcId === 'number' && Number.isFinite(body.bossNpcId)
+        ? body.bossNpcId
+        : null;
+
     // Insert match with event_type
     const { data: newMatch, error: matchError } = await internalClient
       .from('pvp_matches')
@@ -714,6 +736,8 @@ Deno.serve(async (req) => {
         match_minute: eventMinute,
         boss_label: bossLabel,
         event_type: eventType,
+        boss_killer: bossKiller,
+        boss_npc_id: bossNpcId,
       })
       .select()
       .single();
@@ -972,6 +996,10 @@ Deno.serve(async (req) => {
       const lines: string[] = [];
       lines.push(`📅 ${formattedDate}  •  ⏰ ${formattedHour}`);
       lines.push(`🎯 Ordenação: Event Score`);
+      if (bossKiller) {
+        const bossName = bossNpcLabel(bossNpcId);
+        lines.push(`🐉 Boss Killer: **${bossKiller}**${bossName ? ` — ${bossName}` : ''}`);
+      }
       lines.push(SEP);
 
       // Pódio principal
@@ -1113,6 +1141,8 @@ Deno.serve(async (req) => {
       attempt,
       forceProcess,
       eventType,
+      bossKiller,
+      bossNpcId,
     };
   };
 
@@ -1128,33 +1158,36 @@ Deno.serve(async (req) => {
     // --- Authentication ---
     const authHeader = req.headers.get('Authorization');
 
+    // Postagem automática antiga (cron fixo / watchdog) desativada — só detect-boss-kill
     if (body.trigger === 'cron' || body.trigger === 'watchdog') {
-      // Cron calls come from pg_net with the service role or anon key.
-      // Validate that the bearer token matches the service role key or anon key.
+      console.log(`[Auto Process] Trigger "${body.trigger}" disabled. Use detect-boss-kill.`);
+      return new Response(
+        JSON.stringify({
+          success: false,
+          status: 'disabled',
+          message: 'Automatic posting via cron/watchdog is disabled. Boss kill detector is the only auto path.',
+          trigger: body.trigger,
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+
+    // Disparo automático do detector de boss kill (service role / anon via pg_net)
+    if (body.trigger === 'boss_kill') {
       const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
       const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
       const token = authHeader?.replace('Bearer ', '') || '';
       if (!token || (token !== serviceRoleKey && token !== anonKey)) {
-        console.error(`[Auto Process] Unauthorized ${body.trigger} trigger attempt`);
+        console.error('[Auto Process] Unauthorized boss_kill trigger attempt');
         return new Response(
           JSON.stringify({ error: 'Unauthorized' }),
           { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
         );
       }
 
-      const edgeRuntime = (globalThis as unknown as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
-      if (edgeRuntime?.waitUntil) {
-        edgeRuntime.waitUntil(
-          processRanking(body).catch((e) => {
-            console.error('[Auto Process][cron] Background error:', e);
-          }),
-        );
-      } else {
-        await processRanking(body);
-      }
-
+      const result = await processRanking(body);
       return new Response(
-        JSON.stringify({ accepted: true, trigger: body.trigger }),
+        JSON.stringify(result),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
