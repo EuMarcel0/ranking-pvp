@@ -47,6 +47,9 @@ interface RequestBody {
   forceReprocess?: boolean;
   eventHour?: number;
   eventMinute?: number;
+  /** Fim da janela de busca em logs_pvp (BRT). Usado principalmente no Throne manual. */
+  eventEndHour?: number;
+  eventEndMinute?: number;
   eventType?: 'boss_event' | 'throne_conquest';
   testHomolog?: boolean;
   eventDate?: string; // 'YYYY-MM-DD' force a specific date (for homolog testing)
@@ -465,6 +468,8 @@ function getEventTimeRange(eventHour?: number, eventMinute: number = 0, eventTyp
     endOffsetMs = 4500000; // +75 minutes
   } else if (targetEventHour === 22) {
     endOffsetMs = 5400000; // +1.5 hours (until 23:30) for Boss
+  } else if (targetEventHour === 19) {
+    endOffsetMs = 7200000; // +2 hours (19:00 → ~21:00)
   }
   const endDateUTC = new Date(startDateUTC.getTime() + endOffsetMs);
 
@@ -485,6 +490,9 @@ function getEventTimeRange(eventHour?: number, eventMinute: number = 0, eventTyp
   } else if (targetEventHour === 22 && targetEventMinute === 30) {
     localEndHour = 23;
     localEndMinute = 29;
+  } else if (targetEventHour === 19) {
+    localEndHour = 20;
+    localEndMinute = 59;
   }
   
   const localStartDate = `${matchDate}T${String(targetEventHour).padStart(2, '0')}:${String(targetEventMinute).padStart(2, '0')}`;
@@ -517,8 +525,19 @@ Deno.serve(async (req) => {
     const eventHour = body.eventHour;
     const eventMinute = body.eventMinute || 0;
     const eventType = body.eventType || 'boss_event';
+    const hasCustomEnd =
+      typeof body.eventEndHour === 'number' &&
+      body.eventEndHour >= 0 &&
+      body.eventEndHour <= 23;
+    const eventEndHour = hasCustomEnd ? body.eventEndHour! : undefined;
+    const eventEndMinute =
+      hasCustomEnd && typeof body.eventEndMinute === 'number'
+        ? Math.min(59, Math.max(0, body.eventEndMinute))
+        : hasCustomEnd
+          ? 0
+          : undefined;
     
-    console.log(`[Auto Process] Starting automatic ranking processing... Attempt: ${attempt}, Force: ${forceProcess}, Reprocess: ${forceReprocess}, EventHour: ${eventHour}, EventMinute: ${eventMinute}, EventType: ${eventType}`);
+    console.log(`[Auto Process] Starting automatic ranking processing... Attempt: ${attempt}, Force: ${forceProcess}, Reprocess: ${forceReprocess}, EventHour: ${eventHour}, EventMinute: ${eventMinute}, EventType: ${eventType}, End: ${eventEndHour ?? '-'}:${eventEndMinute ?? '-'}`);
 
     const internalSupabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const internalServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -531,17 +550,29 @@ Deno.serve(async (req) => {
       const overrideDate = body.eventDate;
       // Recompute UTC startDate/endDate from overrideDate + matchHour/eventMinute (BRT = UTC-3)
       const sUtc = new Date(`${overrideDate}T${String(matchHour).padStart(2,'0')}:${String(eventMinute).padStart(2,'0')}:00-03:00`);
-      const offsetMs = eventType === 'throne_conquest' ? 4500000 : (matchHour === 22 ? 5400000 : 3600000);
-      startDate = sUtc.toISOString();
-      endDate = new Date(sUtc.getTime() + offsetMs).toISOString();
-      matchDate = overrideDate;
-      // Recompute localStartDate/localEndDate
       let lEndH = matchHour, lEndM = 59;
-      if (eventType === 'throne_conquest') { lEndH = 22; lEndM = 40; }
-      else if (matchHour === 22) { lEndH = 23; lEndM = 29; }
+      if (hasCustomEnd && eventEndHour !== undefined && eventEndMinute !== undefined) {
+        lEndH = eventEndHour;
+        lEndM = eventEndMinute;
+      } else if (eventType === 'throne_conquest') {
+        lEndH = 22; lEndM = 40;
+      } else if (matchHour === 22) {
+        lEndH = 23; lEndM = 29;
+      } else if (matchHour === 19) {
+        lEndH = 20; lEndM = 59;
+      }
+      const eUtc = new Date(`${overrideDate}T${String(lEndH).padStart(2,'0')}:${String(lEndM).padStart(2,'0')}:00-03:00`);
+      startDate = sUtc.toISOString();
+      endDate = eUtc.toISOString();
+      matchDate = overrideDate;
       localStartDate = `${overrideDate}T${String(matchHour).padStart(2,'0')}:${String(eventMinute).padStart(2,'0')}`;
       localEndDate = `${overrideDate}T${String(lEndH).padStart(2,'0')}:${String(lEndM).padStart(2,'0')}`;
-      console.log(`[Auto Process] OVERRIDE eventDate=${overrideDate} → ${startDate} to ${endDate}`);
+      console.log(`[Auto Process] OVERRIDE eventDate=${overrideDate} → ${localStartDate} to ${localEndDate} (UTC ${startDate} → ${endDate})`);
+    } else if (hasCustomEnd && eventEndHour !== undefined && eventEndMinute !== undefined) {
+      // Mesmo dia da partida, fim customizado (ex.: Throne manual)
+      localEndDate = `${matchDate}T${String(eventEndHour).padStart(2,'0')}:${String(eventEndMinute).padStart(2,'0')}`;
+      endDate = new Date(`${matchDate}T${String(eventEndHour).padStart(2,'0')}:${String(eventEndMinute).padStart(2,'0')}:00-03:00`).toISOString();
+      console.log(`[Auto Process] Custom end window → ${localStartDate} to ${localEndDate}`);
     }
 
     console.log(`[Auto Process] Fetching logs for ${matchDate} ${matchHour}:${String(eventMinute).padStart(2, '0')} (${eventType})`);

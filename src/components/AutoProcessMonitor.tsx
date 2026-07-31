@@ -3,8 +3,12 @@ import { supabase } from '@/integrations/supabase/client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { TimePicker } from '@/components/ui/time-picker';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
-import { Activity, CheckCircle2, Clock, AlertCircle, RefreshCw, Calendar, Users, Play, Loader2, Crown, RotateCcw } from 'lucide-react';
+import { Activity, CheckCircle2, Clock, AlertCircle, RefreshCw, Calendar, Users, Play, Loader2, Crown, RotateCcw, Send } from 'lucide-react';
 import { format, formatDistanceToNow, parseISO, isToday, isYesterday, subDays } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { useToast } from '@/hooks/use-toast';
@@ -27,12 +31,27 @@ interface ExpectedEvent {
   eventType: 'boss_event' | 'throne_conquest';
 }
 
+type BossHourOption = '19:00' | '22:00' | '22:30';
+
+function parseBossHour(value: BossHourOption): { hour: number; minute: number } {
+  if (value === '19:00') return { hour: 19, minute: 0 };
+  if (value === '22:30') return { hour: 22, minute: 30 };
+  return { hour: 22, minute: 0 };
+}
+
 export const AutoProcessMonitor = () => {
   const [recentMatches, setRecentMatches] = useState<MatchData[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [processingEvent, setProcessingEvent] = useState<string | null>(null);
   const { toast } = useToast();
+
+  const [manualEventType, setManualEventType] = useState<'boss_event' | 'throne_conquest'>('boss_event');
+  const [manualDate, setManualDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
+  const [manualBossHour, setManualBossHour] = useState<BossHourOption>('22:00');
+  const [manualThroneEndHour, setManualThroneEndHour] = useState(22);
+  const [manualThroneEndMinute, setManualThroneEndMinute] = useState(40);
+  const [manualSyncing, setManualSyncing] = useState(false);
 
   const fetchRecentMatches = async () => {
     try {
@@ -116,6 +135,99 @@ export const AutoProcessMonitor = () => {
     }
   };
 
+  const handleSyncAndPost = async () => {
+    if (!manualDate) {
+      toast({ title: "Data obrigatória", description: "Selecione a data do evento.", variant: "destructive" });
+      return;
+    }
+
+    const isThrone = manualEventType === 'throne_conquest';
+    const { hour, minute } = isThrone
+      ? { hour: 21, minute: 36 }
+      : parseBossHour(manualBossHour);
+
+    // Boss: fim = horário atual do clique (BRT). Throne: picker manual.
+    const nowBrt = new Date(
+      new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })
+    );
+    const todayBrt = `${nowBrt.getFullYear()}-${String(nowBrt.getMonth() + 1).padStart(2, '0')}-${String(nowBrt.getDate()).padStart(2, '0')}`;
+
+    let end: { hour: number; minute: number };
+    if (isThrone) {
+      end = { hour: manualThroneEndHour, minute: manualThroneEndMinute };
+    } else {
+      end = { hour: nowBrt.getHours(), minute: nowBrt.getMinutes() };
+      // Se data passada e "agora" ainda é antes do início do evento nesse dia, usa fim do dia
+      const startMin = hour * 60 + minute;
+      const endMin = end.hour * 60 + end.minute;
+      if (manualDate !== todayBrt && endMin <= startMin) {
+        end = { hour: 23, minute: 59 };
+      }
+    }
+
+    setManualSyncing(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('auto-process-ranking', {
+        body: {
+          trigger: 'manual_sync_post',
+          attempt: 3,
+          forceProcess: true,
+          forceReprocess: true,
+          eventHour: hour,
+          eventMinute: minute,
+          eventEndHour: end.hour,
+          eventEndMinute: end.minute,
+          eventType: manualEventType,
+          eventDate: manualDate,
+        },
+      });
+
+      if (error) throw error;
+
+      if (data?.success && data?.status !== 'already_exists' && data?.status !== 'no_logs' && data?.status !== 'postponed') {
+        const endLabel = `${String(end.hour).padStart(2, '0')}:${String(end.minute).padStart(2, '0')}`;
+        const timeLabel = isThrone
+          ? `21:36 → ${endLabel}`
+          : `${manualBossHour} → ${endLabel}`;
+        toast({
+          title: "Sincronizado e postado!",
+          description: `${isThrone ? 'Throne' : 'PvP Square'} ${manualDate} ${timeLabel} — ${data.playersCount || data.playerCount || 0} jogadores.`,
+        });
+        await fetchRecentMatches();
+      } else if (data?.status === 'no_logs' || data?.noData) {
+        toast({
+          title: "Sem logs",
+          description: data.message || "Nenhum log em logs_pvp para este período.",
+          variant: "destructive",
+        });
+      } else if (data?.status === 'postponed') {
+        toast({
+          title: "Adiado",
+          description: `Ainda há kills recentes (idle ${data.idleMin ?? '?'} min). Aguarde ou force de novo.`,
+          variant: "destructive",
+        });
+      } else if (data?.status === 'already_exists') {
+        toast({ title: "Já processado", description: data.message });
+        await fetchRecentMatches();
+      } else {
+        toast({
+          title: data?.success ? "Concluído" : "Resultado",
+          description: data?.message || JSON.stringify(data),
+        });
+        await fetchRecentMatches();
+      }
+    } catch (error) {
+      console.error('[SyncAndPost] Erro:', error);
+      toast({
+        title: "Erro ao sincronizar/postar",
+        description: error instanceof Error ? error.message : "Erro desconhecido",
+        variant: "destructive",
+      });
+    } finally {
+      setManualSyncing(false);
+    }
+  };
+
   const getExpectedEvents = (): ExpectedEvent[] => {
     const events: ExpectedEvent[] = [];
     const today = new Date();
@@ -125,7 +237,6 @@ export const AutoProcessMonitor = () => {
       const dateStr = format(date, 'yyyy-MM-dd');
       const dayOfWeek = date.getDay();
 
-      // First boss event
       const firstEventHour = dayOfWeek === 1 ? 21 : 20;
       events.push({
         date: dateStr, hour: firstEventHour, minute: 0,
@@ -133,7 +244,6 @@ export const AutoProcessMonitor = () => {
         eventType: 'boss_event',
       });
 
-      // Tuesday and Thursday: Throne Conquest at 21:36
       if (dayOfWeek === 2 || dayOfWeek === 4) {
         events.push({
           date: dateStr, hour: 21, minute: 36,
@@ -142,7 +252,6 @@ export const AutoProcessMonitor = () => {
         });
       }
 
-      // Second boss event
       const isSecondEventLate = dayOfWeek === 2 || dayOfWeek === 4;
       events.push({
         date: dateStr, hour: 22, minute: isSecondEventLate ? 30 : 0,
@@ -243,6 +352,97 @@ export const AutoProcessMonitor = () => {
         </div>
       </CardHeader>
       <CardContent>
+        <div className="mb-6 rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-4">
+          <div>
+            <h3 className="font-semibold flex items-center gap-2">
+              <Send className="w-4 h-4" />
+              Sincronizar e postar
+            </h3>
+            <p className="text-sm text-muted-foreground mt-1">
+              Busca em <code className="text-xs">logs_pvp</code>, sincroniza classe/guild no VortexMU e posta no Discord.
+              Se o evento já existir, reprocessa. No PvP Square, a hora fim é o momento do clique.
+            </p>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <div className="space-y-1.5">
+              <Label>Tipo</Label>
+              <Select
+                value={manualEventType}
+                onValueChange={(v) => setManualEventType(v as 'boss_event' | 'throne_conquest')}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="boss_event">PvP Square (Boss)</SelectItem>
+                  <SelectItem value="throne_conquest">Throne (Devias)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="manual-date">Data</Label>
+              <Input
+                id="manual-date"
+                type="date"
+                value={manualDate}
+                onChange={(e) => setManualDate(e.target.value)}
+              />
+            </div>
+
+            {manualEventType === 'boss_event' ? (
+              <div className="space-y-1.5">
+                <Label>Hora início</Label>
+                <Select
+                  value={manualBossHour}
+                  onValueChange={(v) => setManualBossHour(v as BossHourOption)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="19:00">19:00</SelectItem>
+                    <SelectItem value="22:00">22:00</SelectItem>
+                    <SelectItem value="22:30">22:30</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : (
+              <>
+                <div className="space-y-1.5">
+                  <Label>Hora início</Label>
+                  <div className="flex h-10 items-center rounded-md border border-input bg-muted/40 px-3 text-sm text-muted-foreground">
+                    21:36 (fixo)
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Hora fim</Label>
+                  <TimePicker
+                    hour={manualThroneEndHour}
+                    minute={manualThroneEndMinute}
+                    onChange={(h, m) => {
+                      setManualThroneEndHour(h);
+                      setManualThroneEndMinute(m);
+                    }}
+                  />
+                </div>
+              </>
+            )}
+
+            <div className="space-y-1.5 flex flex-col justify-end">
+              <Button
+                onClick={handleSyncAndPost}
+                disabled={manualSyncing || !manualDate}
+                className="gap-2 w-full"
+              >
+                {manualSyncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                {manualSyncing ? 'Sincronizando...' : 'Sincronizar e postar'}
+              </Button>
+            </div>
+          </div>
+        </div>
+
         <div className="grid grid-cols-3 gap-4 mb-6">
           <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4 text-center">
             <CheckCircle2 className="w-6 h-6 text-green-500 mx-auto mb-2" />
