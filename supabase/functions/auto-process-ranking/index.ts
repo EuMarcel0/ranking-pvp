@@ -780,10 +780,13 @@ Deno.serve(async (req) => {
       console.error('[Auto Process] Failed to insert kill logs:', killLogsError.message);
     }
 
-    // Sincroniza guild/classe/sigla dos jogadores do evento antes de calcular rankings
+    // Sincroniza guild/classe/sigla dos jogadores do evento (+ boss killer) antes de calcular rankings
     const playerNames = Object.keys(parseResult.players);
-    console.log(`[Auto Process] Syncing ${playerNames.length} characters from VortexMU...`);
-    const syncSummary = await syncCharactersFromVortex(internalClient, playerNames, {
+    const syncNames = bossKiller && !playerNames.includes(bossKiller)
+      ? [...playerNames, bossKiller]
+      : playerNames;
+    console.log(`[Auto Process] Syncing ${syncNames.length} characters from VortexMU...`);
+    const syncSummary = await syncCharactersFromVortex(internalClient, syncNames, {
       concurrency: 5,
       delayMs: 150,
     });
@@ -793,7 +796,7 @@ Deno.serve(async (req) => {
     const { data: characters } = await internalClient
       .from('characters')
       .select('name, guild, class, banned, class_short')
-      .in('name', playerNames);
+      .in('name', syncNames);
 
     const characterMap: Record<string, { guild: string; class: string; banned: boolean; class_short: string }> = {};
     if (characters) {
@@ -998,7 +1001,12 @@ Deno.serve(async (req) => {
       lines.push(`🎯 Ordenação: Event Score`);
       if (bossKiller) {
         const bossName = bossNpcLabel(bossNpcId);
-        lines.push(`🐉 Boss Killer: **${bossKiller}**${bossName ? ` — ${bossName}` : ''}`);
+        const killerGuild = characterMap[bossKiller]?.guild?.trim();
+        const killerLabel =
+          killerGuild && killerGuild !== 'Sem Guild'
+            ? `${bossKiller} - ${killerGuild}`
+            : bossKiller;
+        lines.push(`🐉 Boss Killer: **${killerLabel}**${bossName ? ` — ${bossName}` : ''}`);
       }
       lines.push(SEP);
 
