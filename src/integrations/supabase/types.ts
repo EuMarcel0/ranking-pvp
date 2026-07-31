@@ -343,6 +343,8 @@ export type Database = {
           npc_id: number
           killer_name: string
           triggered_at: string
+          post_after: string
+          posted_at: string | null
         }
         Insert: {
           id?: string
@@ -353,6 +355,8 @@ export type Database = {
           npc_id: number
           killer_name: string
           triggered_at?: string
+          post_after?: string
+          posted_at?: string | null
         }
         Update: {
           id?: string
@@ -363,6 +367,8 @@ export type Database = {
           npc_id?: number
           killer_name?: string
           triggered_at?: string
+          post_after?: string
+          posted_at?: string | null
         }
         Relationships: []
       }

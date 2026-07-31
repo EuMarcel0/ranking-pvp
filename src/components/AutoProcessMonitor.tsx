@@ -149,10 +149,27 @@ export const AutoProcessMonitor = () => {
 
       if (data?.triggered) {
         toast({
-          title: 'Boss kill detectado e postado!',
+          title: 'Ranking postado!',
           description: `${data.triggered.killer} — ${bossNpcLabel(data.triggered.npcId) ?? 'Boss'} — ${data.triggered.process?.playerCount ?? '?'} jogadores.`,
         });
         await fetchRecentMatches();
+      } else if (data?.scheduled) {
+        const when = data.scheduled.post_after
+          ? new Date(data.scheduled.post_after).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+          : `+${data.scheduled.delayMinutes ?? 4} min`;
+        toast({
+          title: 'Boss kill detectado — postagem agendada',
+          description: `${data.scheduled.killer} — ${data.scheduled.boss ?? bossNpcLabel(data.scheduled.npcId)} · posta ~${when} (loot/clear).`,
+        });
+      } else if (data?.waiting?.length) {
+        const w = data.waiting[0];
+        const when = w.post_after
+          ? new Date(w.post_after).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+          : '?';
+        toast({
+          title: 'Aguardando delay de postagem',
+          description: `${w.killer_name} — posta ~${when}.`,
+        });
       } else {
         toast({
           title: 'Detector executado',
