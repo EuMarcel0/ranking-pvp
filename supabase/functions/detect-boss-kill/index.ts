@@ -1,7 +1,6 @@
 /**
  * Detecta morte do boss PvP Square via ranking monster_kill do VortexMU (NPC 968/966).
- * Ao detectar +1, agenda postagem para +4 min (tempo de loot/clear da zona).
- * Nos polls seguintes, quando post_after chegar, executa o fluxo "Sincronizar e postar".
+ * Quando detecta +1 kill, dispara imediatamente o fluxo "Sincronizar e postar".
  *
  * Único mecanismo de postagem automática do Boss Event (crons/watchdog antigos desativados).
  */
@@ -19,8 +18,6 @@ const BOSS_NPC_NAMES: Record<number, string> = {
 };
 const VORTEX_URL = 'https://vortexmu.net/rankings/monster_kill/load_ranking_data';
 
-/** Minutos após detecção da morte antes de postar o ranking (loot + clear da zona) */
-const POST_DELAY_MINUTES = 4;
 /** Janela máxima após início do evento (min) para aceitar detecção */
 const MAX_WINDOW_MIN = 120;
 /** Só tenta detectar após X min do início (evita ruído no começo) */
@@ -47,7 +44,6 @@ interface PendingTrigger {
   match_minute: number;
   npc_id: number;
   killer_name: string;
-  post_after: string;
 }
 
 type SupabaseClient = ReturnType<typeof createClient>;
@@ -216,7 +212,7 @@ async function postPendingTrigger(
   const endMinute = brt.getMinutes();
 
   console.log(
-    `[DetectBossKill] Posting after delay: ${pending.killer_name} ` +
+    `[DetectBossKill] Posting: ${pending.killer_name} ` +
       `${bossNpcLabel(pending.npc_id)} window=${pending.match_date} ` +
       `${pending.match_hour}:${String(pending.match_minute).padStart(2, '0')}`,
   );
@@ -287,19 +283,16 @@ Deno.serve(async (req) => {
     const client = createClient(supabaseUrl, serviceKey);
 
     const brt = brtNow();
-    const nowIso = new Date().toISOString();
     const window = activeBossWindow(brt);
     const npcResults: Array<Record<string, unknown>> = [];
-    let scheduled: Record<string, unknown> | null = null;
     let triggered: Record<string, unknown> | null = null;
 
-    // 1) Postagens cujo delay de 4 min já venceu (independente da janela atual)
+    // Drena postagens pendentes (ex.: agendadas no delay antigo de 4 min)
     const { data: dueRows, error: dueErr } = await client
       .from('boss_kill_triggers')
-      .select('id, match_date, match_hour, match_minute, npc_id, killer_name, post_after')
+      .select('id, match_date, match_hour, match_minute, npc_id, killer_name')
       .is('posted_at', null)
-      .lte('post_after', nowIso)
-      .order('post_after', { ascending: true })
+      .order('triggered_at', { ascending: true })
       .limit(5);
 
     if (dueErr) throw new Error(`pending load: ${dueErr.message}`);
@@ -308,11 +301,10 @@ Deno.serve(async (req) => {
       const result = await postPendingTrigger(supabaseUrl, serviceKey, client, row, brt);
       if (result.ok) {
         triggered = result;
-        break; // um post por execução é suficiente
+        break;
       }
     }
 
-    // 2) Poll dos NPCs — detectar morte e agendar (+4 min)
     for (const npcId of BOSS_NPC_IDS) {
       const current = await fetchMonsterRanking(npcId);
       const baseline = await loadBaseline(client, npcId);
@@ -331,16 +323,16 @@ Deno.serve(async (req) => {
         killer: killer?.name ?? null,
       };
 
-      if (!killer || !window || scheduled) {
+      if (!killer || !window || triggered) {
         await saveBaseline(client, npcId, current);
-        if (scheduled && killer) npcResult.skipped = 'already_scheduled_this_run';
+        if (triggered && killer) npcResult.skipped = 'already_posted_this_run';
         npcResults.push(npcResult);
         continue;
       }
 
       const { data: existingTrigger } = await client
         .from('boss_kill_triggers')
-        .select('id, posted_at, post_after')
+        .select('id, posted_at')
         .eq('match_date', window.date)
         .eq('match_hour', window.hour)
         .eq('match_minute', window.minute)
@@ -349,69 +341,72 @@ Deno.serve(async (req) => {
 
       if (existingTrigger) {
         await saveBaseline(client, npcId, current);
-        npcResult.skipped = existingTrigger.posted_at ? 'already_posted' : 'waiting_delay';
-        npcResult.post_after = existingTrigger.post_after;
+        npcResult.skipped = existingTrigger.posted_at ? 'already_posted' : 'pending_retry';
         npcResults.push(npcResult);
         continue;
       }
 
-      const postAfter = new Date(Date.now() + POST_DELAY_MINUTES * 60_000).toISOString();
+      const nowIso = new Date().toISOString();
+      const { data: lockRow, error: lockErr } = await client
+        .from('boss_kill_triggers')
+        .insert({
+          match_date: window.date,
+          match_hour: window.hour,
+          match_minute: window.minute,
+          event_type: 'boss_event',
+          npc_id: npcId,
+          killer_name: killer.name,
+          post_after: nowIso,
+          posted_at: null,
+        })
+        .select('id')
+        .single();
 
-      const { error: lockErr } = await client.from('boss_kill_triggers').insert({
-        match_date: window.date,
-        match_hour: window.hour,
-        match_minute: window.minute,
-        event_type: 'boss_event',
-        npc_id: npcId,
-        killer_name: killer.name,
-        post_after: postAfter,
-        posted_at: null,
-      });
-
-      if (lockErr) {
-        console.log('[DetectBossKill] Schedule lock failed:', lockErr.message);
+      if (lockErr || !lockRow) {
+        console.log('[DetectBossKill] Trigger lock failed:', lockErr?.message);
         npcResult.skipped = 'lock_failed';
         npcResults.push(npcResult);
         continue;
       }
 
-      // Baseline sobe já na detecção para não re-detectar o mesmo +1
-      await saveBaseline(client, npcId, current);
-
       console.log(
-        `[DetectBossKill] Boss kill scheduled (+${POST_DELAY_MINUTES}min): ${killer.name} ` +
-          `boss=${bossNpcLabel(npcId)} (${npcId}) ` +
+        `[DetectBossKill] Boss kill detected: ${killer.name} boss=${bossNpcLabel(npcId)} (${npcId}) ` +
           `window=${window.date} ${window.hour}:${String(window.minute).padStart(2, '0')} ` +
-          `(${killer.prev}->${killer.next}) post_after=${postAfter}`,
+          `(${killer.prev}->${killer.next})`,
       );
 
-      scheduled = {
-        npcId,
-        killer: killer.name,
-        boss: bossNpcLabel(npcId),
-        window,
-        post_after: postAfter,
-        delayMinutes: POST_DELAY_MINUTES,
-      };
-      npcResult.scheduled = true;
-      npcResult.post_after = postAfter;
+      const result = await postPendingTrigger(
+        supabaseUrl,
+        serviceKey,
+        client,
+        {
+          id: lockRow.id,
+          match_date: window.date,
+          match_hour: window.hour,
+          match_minute: window.minute,
+          npc_id: npcId,
+          killer_name: killer.name,
+        },
+        brt,
+      );
+
+      if (!result.ok) {
+        // Libera lock e NÃO atualiza baseline → próximo poll tenta de novo
+        await client.from('boss_kill_triggers').delete().eq('id', lockRow.id);
+        npcResult.processFailed = result.process;
+        npcResults.push(npcResult);
+        continue;
+      }
+
+      await saveBaseline(client, npcId, current);
+      triggered = result;
       npcResults.push(npcResult);
     }
-
-    // Pendentes ainda aguardando delay (info para UI/logs)
-    const { data: waitingRows } = await client
-      .from('boss_kill_triggers')
-      .select('id, killer_name, npc_id, post_after, match_date, match_hour, match_minute')
-      .is('posted_at', null)
-      .gt('post_after', nowIso)
-      .order('post_after', { ascending: true })
-      .limit(5);
 
     return new Response(
       JSON.stringify({
         success: true,
         brt: brt.toISOString(),
-        postDelayMinutes: POST_DELAY_MINUTES,
         window: window
           ? {
               date: window.date,
@@ -421,9 +416,7 @@ Deno.serve(async (req) => {
             }
           : null,
         npcs: npcResults,
-        scheduled,
         triggered,
-        waiting: waitingRows ?? [],
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
