@@ -12,7 +12,7 @@ import { Activity, CheckCircle2, Clock, AlertCircle, RefreshCw, Calendar, Users,
 import { format, formatDistanceToNow, parseISO, isToday, isYesterday, subDays } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { useToast } from '@/hooks/use-toast';
-import { bossNpcLabel } from '@/utils/bossNpcs';
+import { BOSS_NPC_OPTIONS, bossNpcLabel } from '@/utils/bossNpcs';
 
 interface MatchData {
   id: string;
@@ -58,6 +58,8 @@ export const AutoProcessMonitor = () => {
   });
   const [manualThroneEndHour, setManualThroneEndHour] = useState(22);
   const [manualThroneEndMinute, setManualThroneEndMinute] = useState(40);
+  const [manualBossKiller, setManualBossKiller] = useState('');
+  const [manualBossNpcId, setManualBossNpcId] = useState<string>('');
   const [manualSyncing, setManualSyncing] = useState(false);
   const [detectingBoss, setDetectingBoss] = useState(false);
 
@@ -90,6 +92,30 @@ export const AutoProcessMonitor = () => {
   };
 
   useEffect(() => { fetchRecentMatches(); }, []);
+
+  // Prefill killer/boss a partir de boss_kill_triggers quando possível
+  useEffect(() => {
+    if (manualEventType !== 'boss_event' || !manualDate) return;
+    const { hour, minute } = parseBossHour(manualBossHour);
+    let cancelled = false;
+
+    (async () => {
+      const { data } = await supabase
+        .from('boss_kill_triggers')
+        .select('killer_name, npc_id')
+        .eq('match_date', manualDate)
+        .eq('match_hour', hour)
+        .eq('match_minute', minute)
+        .eq('event_type', 'boss_event')
+        .maybeSingle();
+
+      if (cancelled || !data) return;
+      setManualBossKiller(data.killer_name || '');
+      setManualBossNpcId(data.npc_id ? String(data.npc_id) : '');
+    })();
+
+    return () => { cancelled = true; };
+  }, [manualEventType, manualDate, manualBossHour]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -209,20 +235,26 @@ export const AutoProcessMonitor = () => {
 
     setManualSyncing(true);
     try {
-      const { data, error } = await supabase.functions.invoke('auto-process-ranking', {
-        body: {
-          trigger: 'manual_sync_post',
-          attempt: 3,
-          forceProcess: true,
-          forceReprocess: true,
-          eventHour: hour,
-          eventMinute: minute,
-          eventEndHour: end.hour,
-          eventEndMinute: end.minute,
-          eventType: manualEventType,
-          eventDate: manualDate,
-        },
-      });
+      const body: Record<string, unknown> = {
+        trigger: 'manual_sync_post',
+        attempt: 3,
+        forceProcess: true,
+        forceReprocess: true,
+        eventHour: hour,
+        eventMinute: minute,
+        eventEndHour: end.hour,
+        eventEndMinute: end.minute,
+        eventType: manualEventType,
+        eventDate: manualDate,
+      };
+
+      if (!isThrone) {
+        const killer = manualBossKiller.trim();
+        if (killer) body.bossKiller = killer;
+        if (manualBossNpcId) body.bossNpcId = Number(manualBossNpcId);
+      }
+
+      const { data, error } = await supabase.functions.invoke('auto-process-ranking', { body });
 
       if (error) throw error;
 
@@ -231,9 +263,14 @@ export const AutoProcessMonitor = () => {
         const timeLabel = isThrone
           ? `21:36 → ${endLabel}`
           : `${manualBossHour} → ${endLabel}`;
+        const postedKiller = data.bossKiller || manualBossKiller.trim();
+        const postedNpcId = data.bossNpcId || (manualBossNpcId ? Number(manualBossNpcId) : null);
+        const killerInfo = !isThrone && postedKiller
+          ? ` · 🐉 ${postedKiller}${postedNpcId ? ` — ${bossNpcLabel(postedNpcId)}` : ''}`
+          : '';
         toast({
           title: "Sincronizado e postado!",
-          description: `${isThrone ? 'Throne' : 'PvP Square'} ${manualDate} ${timeLabel} — ${data.playersCount || data.playerCount || 0} jogadores.`,
+          description: `${isThrone ? 'Throne' : 'PvP Square'} ${manualDate} ${timeLabel} — ${data.playersCount || data.playerCount || 0} jogadores${killerInfo}.`,
         });
         await fetchRecentMatches();
       } else if (data?.status === 'no_logs' || data?.noData) {
@@ -416,8 +453,9 @@ export const AutoProcessMonitor = () => {
               Sincronizar e postar
             </h3>
             <p className="text-sm text-muted-foreground mt-1">
-              Busca em <code className="text-xs">logs_pvp</code>, sincroniza classe/guild no VortexMU e posta no Discord.
-              Se o evento já existir, reprocessa. No PvP Square, a hora fim é o momento do clique.
+              Busca em <code className="text-xs">logs_pvp</code>, sincroniza classe/guild no VortexMU e posta no Discord
+              com <strong>Boss Killer: nome - guild — boss</strong>. Se o evento já existir, reprocessa.
+              No PvP Square, a hora fim é o momento do clique.
             </p>
           </div>
 
@@ -498,6 +536,39 @@ export const AutoProcessMonitor = () => {
               </Button>
             </div>
           </div>
+
+          {manualEventType === 'boss_event' && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="manual-boss-killer">Boss Killer (personagem)</Label>
+                <Input
+                  id="manual-boss-killer"
+                  placeholder="Nome do personagem que matou o boss"
+                  value={manualBossKiller}
+                  onChange={(e) => setManualBossKiller(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Boss</Label>
+                <Select
+                  value={manualBossNpcId || 'auto'}
+                  onValueChange={(v) => setManualBossNpcId(v === 'auto' ? '' : v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Detectar automaticamente" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Detectar automaticamente</SelectItem>
+                    {BOSS_NPC_OPTIONS.map((b) => (
+                      <SelectItem key={b.id} value={String(b.id)}>
+                        {b.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-3 gap-4 mb-6">

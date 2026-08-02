@@ -58,14 +58,114 @@ interface RequestBody {
   bossNpcId?: number;
 }
 
+const BOSS_NPC_IDS = [968, 966] as const;
 const BOSS_NPC_NAMES: Record<number, string> = {
   966: '(Elite) Devil Sword',
   968: '(Elite) Devil Sorcerer',
 };
+const VORTEX_MONSTER_KILL_URL = 'https://vortexmu.net/rankings/monster_kill/load_ranking_data';
 
 function bossNpcLabel(npcId: number | null | undefined): string | null {
   if (npcId == null) return null;
   return BOSS_NPC_NAMES[npcId] ?? `NPC ${npcId}`;
+}
+
+async function fetchVortexMonsterRanking(npcId: number): Promise<Array<{ name: string; count: number }>> {
+  const headers: Record<string, string> = {
+    accept: 'application/json, text/javascript, */*; q=0.01',
+    'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    origin: 'https://vortexmu.net',
+    referer: 'https://vortexmu.net/rankings/monster-kill',
+    'user-agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
+    'x-requested-with': 'XMLHttpRequest',
+  };
+  const cookie = Deno.env.get('VORTEX_COOKIE');
+  if (cookie) headers.cookie = cookie;
+
+  const res = await fetch(VORTEX_MONSTER_KILL_URL, {
+    method: 'POST',
+    headers,
+    body: `&server=MUONLINE&npc=${npcId}`,
+  });
+  if (!res.ok) throw new Error(`Vortex monster_kill npc=${npcId} HTTP ${res.status}`);
+
+  const json = await res.json();
+  const list = Array.isArray(json?.monster) ? json.monster : [];
+  return list
+    .map((m: { name?: string; count?: number | string }) => ({
+      name: String(m?.name ?? '').trim(),
+      count: Number(m?.count ?? 0),
+    }))
+    .filter((m: { name: string; count: number }) => m.name && Number.isFinite(m.count) && m.count >= 0);
+}
+
+/** Resolve killer do boss: body → boss_kill_triggers → diff Vortex vs baseline */
+async function resolveBossKiller(
+  client: ReturnType<typeof createClient>,
+  opts: {
+    matchDate: string;
+    matchHour: number;
+    matchMinute: number;
+    bodyKiller?: string | null;
+    bodyNpcId?: number | null;
+  },
+): Promise<{ killer: string; npcId: number } | null> {
+  if (opts.bodyKiller) {
+    return {
+      killer: opts.bodyKiller,
+      npcId: opts.bodyNpcId ?? 968,
+    };
+  }
+
+  const { data: trigger } = await client
+    .from('boss_kill_triggers')
+    .select('killer_name, npc_id')
+    .eq('match_date', opts.matchDate)
+    .eq('match_hour', opts.matchHour)
+    .eq('match_minute', opts.matchMinute)
+    .eq('event_type', 'boss_event')
+    .maybeSingle();
+
+  if (trigger?.killer_name) {
+    console.log(`[Auto Process] Boss killer from trigger: ${trigger.killer_name} npc=${trigger.npc_id}`);
+    return { killer: trigger.killer_name, npcId: trigger.npc_id };
+  }
+
+  try {
+    for (const npcId of BOSS_NPC_IDS) {
+      const current = await fetchVortexMonsterRanking(npcId);
+      const { data: baselineRows } = await client
+        .from('monster_kill_baselines')
+        .select('character_name, kill_count')
+        .eq('npc_id', npcId);
+
+      const baseline = new Map<string, number>(
+        (baselineRows ?? []).map((r: { character_name: string; kill_count: number }) => [
+          r.character_name,
+          r.kill_count,
+        ]),
+      );
+      if (baseline.size === 0) continue;
+
+      const increases: Array<{ name: string; delta: number }> = [];
+      for (const entry of current) {
+        const prev = baseline.get(entry.name) ?? 0;
+        if (entry.count > prev) {
+          increases.push({ name: entry.name, delta: entry.count - prev });
+        }
+      }
+
+      if (increases.length === 1 && increases[0].delta === 1) {
+        console.log(`[Auto Process] Boss killer from Vortex diff: ${increases[0].name} npc=${npcId}`);
+        return { killer: increases[0].name, npcId };
+      }
+    }
+  } catch (e) {
+    console.warn('[Auto Process] Failed to resolve boss killer from Vortex:', e);
+  }
+
+  return null;
 }
 
 function brtNowMs(): number {
@@ -718,14 +818,29 @@ Deno.serve(async (req) => {
       ? `Throne ${matchDate} ${matchHour}H`
       : `BOSSx2 ${matchDate} ${matchHour}H`);
 
-    const bossKiller =
+    let bossKiller =
       typeof body.bossKiller === 'string' && body.bossKiller.trim()
         ? body.bossKiller.trim()
         : null;
-    const bossNpcId =
+    let bossNpcId =
       typeof body.bossNpcId === 'number' && Number.isFinite(body.bossNpcId)
         ? body.bossNpcId
         : null;
+
+    // Manual sync / reprocess: resolve killer se não veio no body
+    if (eventType === 'boss_event' && !bossKiller) {
+      const resolved = await resolveBossKiller(internalClient, {
+        matchDate,
+        matchHour,
+        matchMinute: eventMinute,
+        bodyKiller: bossKiller,
+        bodyNpcId: bossNpcId,
+      });
+      if (resolved) {
+        bossKiller = resolved.killer;
+        bossNpcId = resolved.npcId;
+      }
+    }
 
     // Insert match with event_type
     const { data: newMatch, error: matchError } = await internalClient
