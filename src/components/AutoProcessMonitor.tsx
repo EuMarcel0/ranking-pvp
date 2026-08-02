@@ -51,7 +51,11 @@ export const AutoProcessMonitor = () => {
 
   const [manualEventType, setManualEventType] = useState<'boss_event' | 'throne_conquest'>('boss_event');
   const [manualDate, setManualDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
-  const [manualBossHour, setManualBossHour] = useState<BossHourOption>('22:00');
+  const [manualBossHour, setManualBossHour] = useState<BossHourOption>(() => {
+    const dow = new Date().getDay();
+    if (dow === 2 || dow === 4) return '22:30';
+    return dow === 1 ? '22:00' : '19:00';
+  });
   const [manualThroneEndHour, setManualThroneEndHour] = useState(22);
   const [manualThroneEndMinute, setManualThroneEndMinute] = useState(40);
   const [manualSyncing, setManualSyncing] = useState(false);
@@ -275,10 +279,10 @@ export const AutoProcessMonitor = () => {
       const dateStr = format(date, 'yyyy-MM-dd');
       const dayOfWeek = date.getDay();
 
-      const firstEventHour = dayOfWeek === 1 ? 21 : 20;
+      const firstEventHour = dayOfWeek === 1 ? 21 : 19;
       events.push({
         date: dateStr, hour: firstEventHour, minute: 0,
-        label: `BOSSx2 ${format(date, 'dd/MM/yyyy')} ${firstEventHour}H`,
+        label: `BOSSx2 ${format(date, 'dd/MM/yyyy')} ${String(firstEventHour).padStart(2, '0')}:00`,
         eventType: 'boss_event',
       });
 

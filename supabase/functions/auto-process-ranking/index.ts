@@ -449,14 +449,14 @@ function getEventTimeRange(eventHour?: number, eventMinute: number = 0, eventTyp
       else if (currentHour >= 21) targetEventHour = 21;
       else targetEventHour = 22;
     } else if (dayOfWeek === 2 || dayOfWeek === 4) {
-      // Tuesday/Thursday: 20:00 and 22:00
+      // Tuesday/Thursday: 19:00 and 22:30
       if (currentHour >= 22) targetEventHour = 22;
-      else if (currentHour >= 20) targetEventHour = 20;
+      else if (currentHour >= 19) targetEventHour = 19;
       else targetEventHour = 22;
     } else {
-      // Other days: 20:00 and 22:00
+      // Other days: 19:00 and 22:00
       if (currentHour >= 22) targetEventHour = 22;
-      else if (currentHour >= 20) targetEventHour = 20;
+      else if (currentHour >= 19) targetEventHour = 19;
       else targetEventHour = 22;
     }
   }

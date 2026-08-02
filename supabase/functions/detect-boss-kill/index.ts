@@ -59,14 +59,17 @@ function ymd(d: Date): string {
 }
 
 function getBossWindows(brt: Date): EventWindow[] {
-  const dow = brt.getDay();
+  const dow = brt.getDay(); // 0=Dom .. 6=Sáb
   const list: EventWindow[] = [];
 
   if (dow === 1) {
+    // Segunda: 21:00 e 22:00
     list.push({ hour: 21, minute: 0 });
     list.push({ hour: 22, minute: 0 });
   } else {
-    list.push({ hour: 20, minute: 0 });
+    // Demais dias: primeiro boss às 19:00 (antes era 20:00)
+    list.push({ hour: 19, minute: 0 });
+    // Terça/Quinta: segundo boss 22:30; demais 22:00
     if (dow === 2 || dow === 4) {
       list.push({ hour: 22, minute: 30 });
     } else {
