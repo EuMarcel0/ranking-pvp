@@ -21,20 +21,100 @@ interface CronStatusData {
   runs?: CronRun[];
 }
 
-const JOB_NAME = 'boss-kill-detector-every-minute';
+const JOBS = [
+  { name: 'boss-kill-detector-every-minute', title: 'Detector de Boss Kill' },
+  { name: 'monthly-close-season-day-1', title: 'Fechamento mensal + imagem Hall da Fama' },
+] as const;
+
+function CronJobCard({
+  title,
+  data,
+}: {
+  title: string;
+  data: CronStatusData | null;
+}) {
+  const fmt = (iso: string | null) => {
+    if (!iso) return '-';
+    return new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Clock className="w-5 h-5 text-primary" />
+          {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {!data ? (
+          <p className="text-muted-foreground text-sm">Carregando...</p>
+        ) : !data.found ? (
+          <div className="flex items-center gap-2 text-destructive">
+            <XCircle className="w-5 h-5" /> Cron NÃO encontrado
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-2 text-sm">
+              <Badge variant={data.active ? 'default' : 'destructive'}>
+                {data.active ? 'Ativo' : 'Inativo'}
+              </Badge>
+              <Badge variant="outline">{data.job_name}</Badge>
+              <Badge variant="outline">schedule: {data.schedule}</Badge>
+            </div>
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Últimas execuções</p>
+              {(data.runs ?? []).length === 0 ? (
+                <p className="text-sm text-muted-foreground">Sem runs ainda</p>
+              ) : (
+                <ul className="space-y-1 text-xs font-mono">
+                  {(data.runs ?? []).slice(0, 8).map((r, i) => (
+                    <li key={i} className="flex flex-wrap gap-2 border-b border-border/40 py-1">
+                      <span className={r.status === 'succeeded' ? 'text-green-500' : 'text-yellow-500'}>
+                        {r.status === 'succeeded' ? (
+                          <CheckCircle2 className="inline w-3 h-3" />
+                        ) : null}{' '}
+                        {r.status}
+                      </span>
+                      <span>{fmt(r.start_time)}</span>
+                      {r.return_message && (
+                        <span className="text-muted-foreground truncate max-w-full">{r.return_message}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 export const CronStatus = () => {
-  const [data, setData] = useState<CronStatusData | null>(null);
+  const [jobs, setJobs] = useState<Record<string, CronStatusData | null>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchStatus = async () => {
     setLoading(true);
     setError(null);
-    const { data: res, error: err } = await supabase.rpc('get_cron_status', { p_job_name: JOB_NAME });
-    if (err) setError(err.message);
-    else setData(res as unknown as CronStatusData);
-    setLoading(false);
+    try {
+      const next: Record<string, CronStatusData | null> = {};
+      for (const job of JOBS) {
+        const { data: res, error: err } = await supabase.rpc('get_cron_status', {
+          p_job_name: job.name,
+        });
+        if (err) throw err;
+        next[job.name] = res as unknown as CronStatusData;
+      }
+      setJobs(next);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -43,15 +123,10 @@ export const CronStatus = () => {
     return () => clearInterval(t);
   }, []);
 
-  const fmt = (iso: string | null) => {
-    if (!iso) return '-';
-    return new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-  };
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold text-foreground">Status do Cron — Detector de Boss Kill</h2>
+        <h2 className="text-2xl font-bold text-foreground">Status dos Crons</h2>
         <Button onClick={fetchStatus} disabled={loading} size="sm" variant="outline" className="gap-2">
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           Atualizar
@@ -64,81 +139,11 @@ export const CronStatus = () => {
         </Card>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Clock className="w-5 h-5 text-primary" />
-            {JOB_NAME}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {!data ? (
-            <p className="text-muted-foreground text-sm">Carregando...</p>
-          ) : !data.found ? (
-            <div className="flex items-center gap-2 text-destructive">
-              <XCircle className="w-5 h-5" /> Cron NÃO encontrado
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <Stat label="Ativo">
-                  {data.active ? (
-                    <Badge className="bg-green-600 hover:bg-green-600 gap-1">
-                      <CheckCircle2 className="w-3 h-3" /> Sim
-                    </Badge>
-                  ) : (
-                    <Badge variant="destructive" className="gap-1">
-                      <XCircle className="w-3 h-3" /> Não
-                    </Badge>
-                  )}
-                </Stat>
-                <Stat label="Schedule"><code className="text-primary">{data.schedule}</code></Stat>
-                <Stat label="Job ID">{data.jobid}</Stat>
-                <Stat label="Último disparo">{fmt(data.runs?.[0]?.start_time ?? null)}</Stat>
-              </div>
-
-              <div>
-                <h3 className="text-sm font-semibold text-muted-foreground mb-2">Últimos 10 disparos</h3>
-                <div className="border border-border rounded-md overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead className="bg-muted/50">
-                      <tr>
-                        <th className="text-left px-3 py-2">Início</th>
-                        <th className="text-left px-3 py-2">Fim</th>
-                        <th className="text-left px-3 py-2">Status</th>
-                        <th className="text-left px-3 py-2">Mensagem</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(data.runs ?? []).length === 0 ? (
-                        <tr><td colSpan={4} className="px-3 py-4 text-muted-foreground text-center">Sem execuções registradas ainda.</td></tr>
-                      ) : (
-                        data.runs!.map((r, i) => (
-                          <tr key={i} className="border-t border-border">
-                            <td className="px-3 py-2">{fmt(r.start_time)}</td>
-                            <td className="px-3 py-2">{fmt(r.end_time)}</td>
-                            <td className="px-3 py-2">
-                              <Badge variant={r.status === 'succeeded' ? 'default' : 'destructive'}>{r.status}</Badge>
-                            </td>
-                            <td className="px-3 py-2 text-xs text-muted-foreground truncate max-w-[300px]">{r.return_message || '-'}</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
+      <div className="grid gap-4 md:grid-cols-1 lg:grid-cols-2">
+        {JOBS.map((job) => (
+          <CronJobCard key={job.name} title={job.title} data={jobs[job.name] ?? null} />
+        ))}
+      </div>
     </div>
   );
 };
-
-const Stat = ({ label, children }: { label: string; children: React.ReactNode }) => (
-  <div className="p-3 rounded-md bg-muted/30 border border-border">
-    <div className="text-xs text-muted-foreground mb-1">{label}</div>
-    <div className="font-medium text-foreground">{children}</div>
-  </div>
-);
