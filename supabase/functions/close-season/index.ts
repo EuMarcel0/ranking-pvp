@@ -51,6 +51,35 @@ async function postChunks(webhook: string, chunks: string[]) {
   }
 }
 
+async function postImageToDiscord(
+  webhook: string,
+  opts: { base64: string; filename?: string; content?: string },
+) {
+  const raw = opts.base64.includes(',') ? opts.base64.split(',')[1] : opts.base64;
+  const binary = atob(raw);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const form = new FormData();
+  form.append(
+    'payload_json',
+    JSON.stringify({
+      content: opts.content ?? '',
+    }),
+  );
+  form.append(
+    'files[0]',
+    new Blob([bytes], { type: 'image/png' }),
+    opts.filename ?? 'hall-da-fama.png',
+  );
+
+  const res = await fetch(webhook, { method: 'POST', body: form });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Discord webhook failed (${res.status}): ${text.slice(0, 300)}`);
+  }
+}
+
 function pickWebhook(target: 'prod' | 'homolog'): string | undefined {
   return target === 'prod'
     ? Deno.env.get('DISCORD_WEBHOOK_URL_PROD')
@@ -134,9 +163,42 @@ Deno.serve(async (req) => {
     try { body = await req.json(); } catch (_) {}
     const preview: boolean = body?.preview === true;
     const postOnly: boolean = body?.post_only === true;
+    const postImage: boolean = body?.post_image === true;
     const skipDiscord: boolean = body?.skip_discord === true;
     const winnersMode: boolean = body?.winners === true;
     const target: 'prod' | 'homolog' = body?.target === 'prod' ? 'prod' : (body?.target === 'homolog' ? 'homolog' : 'prod');
+
+    // ===== POST IMAGE MODE: PNG gerado no front → Discord =====
+    if (postImage) {
+      const imageBase64: string | undefined = body?.image_base64;
+      if (!imageBase64) throw new Error('image_base64 é obrigatório no modo post_image');
+
+      const paused = Deno.env.get('AUTO_POST_PAUSED') === 'true';
+      if (paused && target === 'prod') {
+        throw new Error('Postagem automática pausada (AUTO_POST_PAUSED)');
+      }
+
+      const webhook = pickWebhook(target);
+      if (!webhook) throw new Error(`Webhook ${target} não configurado`);
+
+      const seasonLabel = typeof body?.season_name === 'string' ? body.season_name : 'Temporada';
+      const prefix = target === 'homolog' ? '🧪 **[HOMOLOG]** ' : '';
+      const content =
+        typeof body?.caption === 'string' && body.caption.trim()
+          ? body.caption
+          : `${prefix}🏆 **HALL DA FAMA / GANHADORES — ${seasonLabel}**`;
+
+      await postImageToDiscord(webhook, {
+        base64: imageBase64,
+        filename: `hall-da-fama-${seasonLabel.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}.png`,
+        content,
+      });
+
+      return new Response(
+        JSON.stringify({ success: true, mode: 'post_image', target, discord_posted: true, season: seasonLabel }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
 
     // ===== WINNERS OF THE MONTH MODE =====
     // Builds Top 5 PvP (Ranking Geral) + Best per Class for a season.

@@ -6,12 +6,13 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Trophy, Crown, Skull, Flame, Award, Heart, Lock, Unlock, FileDown, FlaskConical, Eye, Send, Medal, Swords } from 'lucide-react';
+import { Trophy, Crown, Skull, Flame, Award, Heart, Lock, Unlock, FileDown, FlaskConical, Eye, Send, Medal, Swords, ImageIcon } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { useUserRole } from '@/hooks/useUserRole';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { buildHallFameSections, renderHallDaFamaImage } from '@/utils/hallDaFamaImage';
 
 const RANKING_META: Record<string, { label: string; icon: any; color: string }> = {
   geral: { label: 'Ranking Geral', icon: Trophy, color: 'text-yellow-400' },
@@ -33,6 +34,8 @@ export const HallDaFama = () => {
   const [posting, setPosting] = useState<'prod' | 'homolog' | null>(null);
   const [previewData, setPreviewData] = useState<{ season: string; grouped: Record<string, any[]> } | null>(null);
   const [postingWinners, setPostingWinners] = useState<'prod' | 'homolog' | null>(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [generatingImage, setGeneratingImage] = useState(false);
 
   const { data: seasons, isLoading: loadingSeasons } = useQuery({
     queryKey: ['seasons-list'],
@@ -103,40 +106,6 @@ export const HallDaFama = () => {
       toast({ title: 'Erro', description: e?.message ?? String(e), variant: 'destructive' });
     } finally {
       setPreviewing(false);
-    }
-  };
-
-  const handlePreviewHomolog = async () => {
-    if (!confirm('Gerar PREVIEW da temporada ATUAL e postar no webhook de HOMOLOGAÇÃO?')) return;
-    setPreviewing(true);
-    try {
-      const { data, error } = await supabase.functions.invoke('close-season', {
-        body: { preview: true, target: 'homolog' },
-      });
-      if (error) throw error;
-      toast({ title: 'Preview enviado!', description: `${data?.snapshots ?? 0} registros postados no Discord de homologação.` });
-    } catch (e: any) {
-      toast({ title: 'Erro', description: e?.message ?? String(e), variant: 'destructive' });
-    } finally {
-      setPreviewing(false);
-    }
-  };
-
-  const handlePostToDiscord = async (target: 'prod' | 'homolog') => {
-    if (!currentId) return;
-    const label = target === 'prod' ? 'PRODUÇÃO' : 'HOMOLOGAÇÃO';
-    if (!confirm(`Postar esta temporada no Discord de ${label}?`)) return;
-    setPosting(target);
-    try {
-      const { data, error } = await supabase.functions.invoke('close-season', {
-        body: { post_only: true, season_id: currentId, target },
-      });
-      if (error) throw error;
-      toast({ title: 'Postado no Discord!', description: `${data?.snapshots ?? 0} registros enviados (${label}).` });
-    } catch (e: any) {
-      toast({ title: 'Erro', description: e?.message ?? String(e), variant: 'destructive' });
-    } finally {
-      setPosting(null);
     }
   };
 
@@ -245,19 +214,115 @@ export const HallDaFama = () => {
     },
   });
 
+  const buildMonthlyImageDataUrl = async (forDiscord = false) => {
+    let seasonName = currentSeason?.name || activeSeason?.name || 'Temporada';
+    let groupedData: Record<string, any[]> = grouped;
+    let top5: any[] = winnersData?.top5 ?? [];
+    let bestPerClass: any[] = winnersData?.bestPerClass ?? [];
+    const seasonIdForWinners = currentId || activeSeason?.id;
+
+    const hasHallRows = Object.values(groupedData).some((l) => l?.length > 0);
+    if (!hasHallRows) {
+      const { data, error } = await supabase.functions.invoke('close-season', {
+        body: { preview: true, skip_discord: true },
+      });
+      if (error) throw error;
+      seasonName = data?.season ?? seasonName;
+      groupedData = data?.grouped ?? {};
+    }
+
+    if ((!top5.length && !bestPerClass.length) && seasonIdForWinners) {
+      const { data, error } = await supabase.functions.invoke('close-season', {
+        body: { winners: true, season_id: seasonIdForWinners, skip_discord: true },
+      });
+      if (error) throw error;
+      seasonName = data?.season ?? seasonName;
+      top5 = data?.top5 ?? [];
+      bestPerClass = data?.bestPerClass ?? [];
+    }
+
+    const hallSections = buildHallFameSections(groupedData);
+    if (hallSections.length === 0 && top5.length === 0 && bestPerClass.length === 0) {
+      throw new Error('Não há rankings para montar a imagem.');
+    }
+
+    const dataUrl = renderHallDaFamaImage({
+      seasonName,
+      top5,
+      bestPerClass,
+      hallSections,
+      forDiscord,
+    });
+
+    return { dataUrl, seasonName };
+  };
+
+  const postMonthlyImage = async (target: 'prod' | 'homolog') => {
+    const { dataUrl, seasonName } = await buildMonthlyImageDataUrl(true);
+    const prefix = target === 'homolog' ? '🧪 **[HOMOLOG]** ' : '';
+    const { data, error } = await supabase.functions.invoke('close-season', {
+      body: {
+        post_image: true,
+        target,
+        season_name: seasonName,
+        image_base64: dataUrl,
+        caption: `${prefix}🏆 **HALL DA FAMA / GANHADORES — ${seasonName}**`,
+      },
+    });
+    if (error) throw error;
+    return { data, seasonName };
+  };
+
+  const handlePreviewHomolog = async () => {
+    if (!confirm('Gerar imagem da temporada e postar no webhook de HOMOLOGAÇÃO?')) return;
+    setPreviewing(true);
+    try {
+      const { seasonName } = await postMonthlyImage('homolog');
+      toast({ title: 'Imagem enviada!', description: `${seasonName} postada no Discord de homologação.` });
+    } catch (e: any) {
+      toast({ title: 'Erro', description: e?.message ?? String(e), variant: 'destructive' });
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const handlePostToDiscord = async (target: 'prod' | 'homolog') => {
+    if (!currentId && !activeSeason?.id) return;
+    const label = target === 'prod' ? 'PRODUÇÃO' : 'HOMOLOGAÇÃO';
+    if (!confirm(`Postar imagem do Hall da Fama / Ganhadores no Discord de ${label}?`)) return;
+    setPosting(target);
+    try {
+      const { seasonName } = await postMonthlyImage(target);
+      toast({ title: 'Imagem postada!', description: `${seasonName} enviada (${label}).` });
+    } catch (e: any) {
+      toast({ title: 'Erro', description: e?.message ?? String(e), variant: 'destructive' });
+    } finally {
+      setPosting(null);
+    }
+  };
+
+  const handleTestHallImage = async () => {
+    setGeneratingImage(true);
+    try {
+      const { dataUrl } = await buildMonthlyImageDataUrl(false);
+      setImagePreviewUrl(dataUrl);
+    } catch (e: any) {
+      toast({ title: 'Erro', description: e?.message ?? String(e), variant: 'destructive' });
+    } finally {
+      setGeneratingImage(false);
+    }
+  };
+
   const handlePostWinners = async (target: 'prod' | 'homolog') => {
     if (!winnersSeasonId) return;
     const label = target === 'prod' ? 'PRODUÇÃO' : 'HOMOLOGAÇÃO';
-    if (!confirm(`Postar Ganhadores do Mês (${winnersSeasonName}) no Discord de ${label}?`)) return;
+    if (!confirm(`Postar imagem do Hall da Fama / Ganhadores (${winnersSeasonName}) no Discord de ${label}?`)) return;
     setPostingWinners(target);
     try {
-      const { data, error } = await supabase.functions.invoke('close-season', {
-        body: { winners: true, season_id: winnersSeasonId, target },
-      });
-      if (error) throw error;
+      const { seasonName } = await postMonthlyImage(target);
       toast({
-        title: 'Ganhadores postados!',
-        description: `Top 5 + ${data?.bestPerClass?.length ?? 0} classes enviados (${label}).`,
+        title: 'Imagem postada!',
+        description: `${seasonName} enviada como imagem (${label}).`,
       });
     } catch (e: any) {
       toast({ title: 'Erro', description: e?.message ?? String(e), variant: 'destructive' });
@@ -296,7 +361,11 @@ export const HallDaFama = () => {
             </Button>
             <Button onClick={handlePreviewHomolog} disabled={previewing} variant="secondary" size="sm">
               <FlaskConical className="w-4 h-4 mr-1" />
-              Preview no Discord (Homolog)
+              {previewing ? 'Enviando...' : 'Postar imagem (Homolog)'}
+            </Button>
+            <Button onClick={handleTestHallImage} disabled={generatingImage} variant="outline" size="sm">
+              <ImageIcon className="w-4 h-4 mr-1" />
+              {generatingImage ? 'Gerando...' : 'Teste imagem hall da fama'}
             </Button>
             <Button onClick={handleCloseSeason} disabled={closing} variant="destructive" size="sm">
               <Lock className="w-4 h-4 mr-1" />
@@ -332,7 +401,7 @@ export const HallDaFama = () => {
                     disabled={postingWinners !== null || loadingWinners}
                   >
                     <Send className="w-4 h-4 mr-1" />
-                    {postingWinners === 'homolog' ? 'Postando...' : 'Postar Ganhadores (Homolog)'}
+                    {postingWinners === 'homolog' ? 'Postando...' : 'Postar imagem (Homolog)'}
                   </Button>
                   <Button
                     onClick={() => handlePostWinners('prod')}
@@ -341,7 +410,7 @@ export const HallDaFama = () => {
                     disabled={postingWinners !== null || loadingWinners}
                   >
                     <Send className="w-4 h-4 mr-1" />
-                    {postingWinners === 'prod' ? 'Postando...' : 'Postar Ganhadores (Prod)'}
+                    {postingWinners === 'prod' ? 'Postando...' : 'Postar imagem (Prod)'}
                   </Button>
                 </div>
               )}
@@ -465,13 +534,17 @@ export const HallDaFama = () => {
             )}
             {isAdmin && currentId && (
               <>
+                <Button onClick={handleTestHallImage} disabled={generatingImage} variant="outline" size="sm">
+                  <ImageIcon className="w-4 h-4 mr-1" />
+                  {generatingImage ? 'Gerando...' : 'Teste imagem hall da fama'}
+                </Button>
                 <Button onClick={() => handlePostToDiscord('homolog')} disabled={posting !== null} variant="secondary" size="sm">
                   <Send className="w-4 h-4 mr-1" />
-                  {posting === 'homolog' ? 'Postando...' : 'Postar Discord (Homolog)'}
+                  {posting === 'homolog' ? 'Postando...' : 'Postar imagem (Homolog)'}
                 </Button>
                 <Button onClick={() => handlePostToDiscord('prod')} disabled={posting !== null} variant="default" size="sm">
                   <Send className="w-4 h-4 mr-1" />
-                  {posting === 'prod' ? 'Postando...' : 'Postar Discord (Prod)'}
+                  {posting === 'prod' ? 'Postando...' : 'Postar imagem (Prod)'}
                 </Button>
                 <Button onClick={() => handleReopenSeason(currentId)} variant="outline" size="sm">
                   <Unlock className="w-4 h-4 mr-1" /> Reabrir temporada
@@ -573,6 +646,29 @@ export const HallDaFama = () => {
               );
             })}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Preview da imagem do Hall da Fama (sem Discord) */}
+      <Dialog open={!!imagePreviewUrl} onOpenChange={(open) => !open && setImagePreviewUrl(null)}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ImageIcon className="w-5 h-5" /> Teste imagem — Hall da Fama
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground -mt-1">
+            Preview local gerado no navegador. Nada foi postado no Discord.
+          </p>
+          {imagePreviewUrl && (
+            <div className="rounded-lg border border-border/60 overflow-hidden bg-slate-950">
+              <img
+                src={imagePreviewUrl}
+                alt="Preview Hall da Fama"
+                className="w-full h-auto block"
+              />
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>
