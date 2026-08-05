@@ -116,7 +116,7 @@ export const DatabaseImport = ({ onDataLoaded, eventType = 'boss_event' }: Datab
           {eventType === 'throne_conquest'
             ? ' - Filtrando mapa Devias'
             : eventType === 'world_boss'
-              ? ' - Filtrando World Boss (Boss Event PvP)'
+              ? ' - Filtrando Selupan / Raklion (World Boss PvP)'
               : ' - Filtrando mapa PvP Square'}
         </CardDescription>
       </CardHeader>

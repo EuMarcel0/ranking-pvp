@@ -64,10 +64,18 @@ interface RequestBody {
 const BOSS_NPC_IDS = [922, 968, 966] as const;
 const WORLD_BOSS_NPC_ID = 922;
 const BOSS_NPC_NAMES: Record<number, string> = {
-  922: 'World Boss',
+  922: 'Selupan',
   966: '(Elite) Devil Sword',
   968: '(Elite) Devil Sorcerer',
 };
+
+/**
+ * Selupan (922) também é boss diário PvE. Só consideramos World Boss PvP
+ * quando há volume mínimo de kills PvP em Raklion no lookback.
+ * Manual sync (trigger !== boss_kill) ignora esse limiar.
+ */
+const WORLD_BOSS_MIN_PVP_KILLS = 15;
+const WORLD_BOSS_MIN_UNIQUE_PLAYERS = 6;
 const VORTEX_MONSTER_KILL_URL = 'https://vortexmu.net/rankings/monster_kill/load_ranking_data';
 
 function bossNpcLabel(npcId: number | null | undefined): string | null {
@@ -311,10 +319,6 @@ function matchKill(content: string): { killer: string; victim: string } | null {
   return null;
 }
 
-function isBossEventServerLog(content: string): boolean {
-  return /\[Server:\s*(?:Boss Event PvP|Platinum PvP)\]/i.test(content);
-}
-
 function isDeviasBossEventLog(content: string): boolean {
   return /Devias/i.test(content) && /\[Server:\s*Boss Event PvP\]/i.test(content);
 }
@@ -327,9 +331,14 @@ function isPvPSquareBossEventLog(content: string): boolean {
   );
 }
 
-/** World Boss (922): qualquer mapa do Boss Event PvP, exceto Devias (Throne). */
+/**
+ * Selupan World Boss PvP: kills PvP em Raklion (qualquer server tag).
+ * Square/Devias ficam de fora. O limiar de volume separa evento de PK/PvE fraco.
+ */
 function isWorldBossEventLog(content: string): boolean {
-  return isBossEventServerLog(content) && !isDeviasBossEventLog(content);
+  if (!/Raklion/i.test(content)) return false;
+  if (isDeviasBossEventLog(content) || isPvPSquareBossEventLog(content)) return false;
+  return /:dagger:/.test(content) && /matou/i.test(content);
 }
 
 function accumulateKillStats(
@@ -397,13 +406,13 @@ function parseExternalDbContentBoss(logs: ExternalLogEntry[]): ParseResult {
   );
 }
 
-// Parser logic for World Boss (NPC 922) — mapas open-world no Boss Event PvP
+// Parser logic for Selupan World Boss PvP (NPC 922) — Raklion
 function parseExternalDbContentWorldBoss(logs: ExternalLogEntry[]): ParseResult {
   return accumulateKillStats(
     logs,
     isWorldBossEventLog,
-    'World Boss',
-    'Auto Parser WorldBoss',
+    'Selupan',
+    'Auto Parser Selupan',
   );
 }
 
@@ -894,10 +903,35 @@ Deno.serve(async (req) => {
       return { success: true, status: 'no_players', message: 'No valid player data', matchDate, matchHour, eventType };
     }
 
+    // Selupan diário (PvE): +1 no monster_kill sem PvP relevante em Raklion → não postar
+    if (isWorldBossEvent && body.trigger === 'boss_kill') {
+      const pvpKills = parseResult.killLogs.length;
+      const uniquePlayers = Object.keys(parseResult.players).length;
+      if (pvpKills < WORLD_BOSS_MIN_PVP_KILLS || uniquePlayers < WORLD_BOSS_MIN_UNIQUE_PLAYERS) {
+        console.log(
+          `[Auto Process] Selupan kill sem World Boss PvP ` +
+            `(kills=${pvpKills}/${WORLD_BOSS_MIN_PVP_KILLS}, players=${uniquePlayers}/${WORLD_BOSS_MIN_UNIQUE_PLAYERS}) — skip`,
+        );
+        return {
+          success: true,
+          status: 'skipped_normal_selupan',
+          message:
+            'Kill de Selupan sem volume de PvP em Raklion (boss diário normal). Ranking não postado.',
+          matchDate,
+          matchHour,
+          eventType,
+          pvpKills,
+          uniquePlayers,
+          minPvpKills: WORLD_BOSS_MIN_PVP_KILLS,
+          minUniquePlayers: WORLD_BOSS_MIN_UNIQUE_PLAYERS,
+        };
+      }
+    }
+
     const bossLabel = parseResult.bossLabel || (eventType === 'throne_conquest'
       ? `Throne ${matchDate} ${matchHour}H`
       : isWorldBossEvent
-        ? `World Boss ${matchDate} ${matchHour}H`
+        ? `Selupan ${matchDate} ${matchHour}H`
         : `BOSSx2 ${matchDate} ${matchHour}H`);
 
     let bossKiller =
@@ -1158,11 +1192,11 @@ Deno.serve(async (req) => {
       const rankingTitle = isThrone
         ? '🏆 Ranking Throne Conquest'
         : isWorldBoss
-          ? '🏆 Ranking World Boss'
+          ? '🏆 Ranking Selupan (World Boss PvP)'
           : '🏆 Ranking BOSS Diário';
       const reiTitle = isThrone ? '👑 REI DO TRONO' : '👑 REI DO PvP';
       const embedColor = isThrone ? 0xF59E0B : isWorldBoss ? 0x8B5CF6 : 0x10B981;
-      const eventLabel = isThrone ? 'Throne Conquest' : isWorldBoss ? 'World Boss' : 'Boss/evento';
+      const eventLabel = isThrone ? 'Throne Conquest' : isWorldBoss ? 'Selupan World Boss' : 'Boss/evento';
 
       const SEP = '━━━━━━━━━━━━━━━━━━';
 

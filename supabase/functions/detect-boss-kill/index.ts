@@ -1,8 +1,9 @@
 /**
  * Detecta morte dos bosses PvP via ranking monster_kill do VortexMU
- * (NPC 968/966 Square + 922 World Boss).
- * Sem cronograma fixo: qualquer +1 dispara "Sincronizar e postar".
- * Janela de logs = lookback a partir de agora (BRT).
+ * (NPC 968/966 Square + 922 Selupan).
+ * Square: qualquer +1 dispara post.
+ * Selupan: também é boss diário PvE — só posta se houver World Boss PvP
+ * (volume mínimo de kills em Raklion); senão só atualiza baseline.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -13,14 +14,14 @@ const corsHeaders = {
 
 const BOSS_NPC_IDS = [922, 968, 966] as const;
 const BOSS_NPC_NAMES: Record<number, string> = {
-  922: 'World Boss',
+  922: 'Selupan',
   966: '(Elite) Devil Sword',
   968: '(Elite) Devil Sorcerer',
 };
 const WORLD_BOSS_NPC_ID = 922;
 const VORTEX_URL = 'https://vortexmu.net/rankings/monster_kill/load_ranking_data';
 
-/** Lookback padrão (Boss Square). World Boss costuma durar mais. */
+/** Lookback padrão (Boss Square). Selupan World Boss costuma durar mais. */
 const LOG_LOOKBACK_MINUTES = 150;
 const WORLD_BOSS_LOOKBACK_MINUTES = 240;
 /** Evita reprocessar o mesmo npc se o poll oscilar no mesmo minuto */
@@ -246,12 +247,41 @@ async function postPendingTrigger(
   });
 
   const processJson = await processRes.json().catch(() => ({}));
+  const status = processJson?.status as string | undefined;
+
+  // Selupan diário (PvE): sem PvP relevante → fecha o trigger e deixa o caller atualizar baseline
+  const selupanNormalSkip =
+    pending.npc_id === WORLD_BOSS_NPC_ID &&
+    (status === 'skipped_normal_selupan' ||
+      status === 'no_players' ||
+      status === 'no_logs');
+
+  if (selupanNormalSkip) {
+    console.log(
+      `[DetectBossKill] Selupan normal (não World Boss PvP): ${pending.killer_name} status=${status}`,
+    );
+    await client
+      .from('boss_kill_triggers')
+      .update({ posted_at: new Date().toISOString() })
+      .eq('id', pending.id);
+
+    return {
+      ok: true,
+      skipped: 'normal_selupan_kill',
+      npcId: pending.npc_id,
+      killer: pending.killer_name,
+      boss: bossNpcLabel(pending.npc_id),
+      process: processJson,
+    };
+  }
+
   const processOk =
     processRes.ok &&
     processJson?.success === true &&
-    processJson?.status !== 'no_logs' &&
-    processJson?.status !== 'no_players' &&
-    processJson?.status !== 'postponed';
+    status !== 'no_logs' &&
+    status !== 'no_players' &&
+    status !== 'postponed' &&
+    status !== 'skipped_normal_selupan';
 
   if (!processOk) {
     console.error('[DetectBossKill] auto-process failed, will retry next poll:', processJson);
@@ -419,7 +449,12 @@ Deno.serve(async (req) => {
       }
 
       await saveBaseline(client, npcId, current);
-      triggeredList.push(result);
+      if (result.skipped === 'normal_selupan_kill') {
+        npcResult.skipped = 'normal_selupan_kill';
+        npcResult.killer = killer.name;
+      } else {
+        triggeredList.push(result);
+      }
       npcResults.push(npcResult);
     }
 

@@ -184,10 +184,14 @@ export const AutoProcessMonitor = () => {
         });
         await fetchRecentMatches();
       } else {
+        const selupanSkip = (data?.npcs as Array<{ skipped?: string }> | undefined)?.some(
+          (n) => n.skipped === 'normal_selupan_kill',
+        );
         toast({
-          title: 'Detector executado',
-          description:
-            data?.mode === 'schedule_free'
+          title: selupanSkip ? 'Selupan diário ignorado' : 'Detector executado',
+          description: selupanSkip
+            ? 'Kill do Selupan sem World Boss PvP em Raklion — baseline atualizado, ranking não postado.'
+            : data?.mode === 'schedule_free'
               ? 'Nenhum +1 nos NPCs 922/968/966 (baseline atualizado se necessário).'
               : 'Nenhuma mudança detectada nos bosses PvP.',
         });
@@ -271,7 +275,7 @@ export const AutoProcessMonitor = () => {
         const killerInfo = !isThrone && postedKiller
           ? ` · 🐉 ${postedKiller}${postedNpcId ? ` — ${bossNpcLabel(postedNpcId)}` : ''}`
           : '';
-        const eventLabel = isThrone ? 'Throne' : isWorldBoss ? 'World Boss' : 'PvP Square';
+        const eventLabel = isThrone ? 'Throne' : isWorldBoss ? 'Selupan' : 'PvP Square';
         toast({
           title: "Sincronizado e postado!",
           description: `${eventLabel} ${manualDate} ${timeLabel} — ${data.playersCount || data.playerCount || 0} jogadores${killerInfo}.`,
@@ -426,7 +430,7 @@ export const AutoProcessMonitor = () => {
             <div>
               <CardTitle>Monitoramento de Processamento Automático</CardTitle>
               <CardDescription className="mt-1">
-                Automático e genérico: qualquer +1 nos NPCs 922 (World Boss), 968 e 966 dispara o post (sem horário fixo).
+                968/966: qualquer +1 posta. 922 (Selupan): só posta se for World Boss PvP em Raklion; kill diário normal só atualiza baseline.
               </CardDescription>
             </div>
           </div>
@@ -437,7 +441,7 @@ export const AutoProcessMonitor = () => {
               onClick={handleRunBossDetector}
               disabled={detectingBoss}
               className="gap-2"
-              title="Consulta NPCs 922/968/966 (sem horário fixo). Qualquer +1 dispara sync+post"
+              title="968/966: +1 posta. 922 Selupan: só World Boss PvP (PvP em Raklion)"
             >
               {detectingBoss ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
               {detectingBoss ? 'Detectando...' : 'Rodar detector'}
@@ -480,7 +484,7 @@ export const AutoProcessMonitor = () => {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="boss_event">PvP Square (Boss)</SelectItem>
-                  <SelectItem value="world_boss">World Boss</SelectItem>
+                  <SelectItem value="world_boss">Selupan (World Boss PvP)</SelectItem>
                   <SelectItem value="throne_conquest">Throne (Devias)</SelectItem>
                 </SelectContent>
               </Select>

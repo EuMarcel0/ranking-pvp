@@ -63,9 +63,6 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
   const mapPatternDeviasSingleAsterisks = /\*Devias\*\s*-\s*\*\[Server: Boss Event PvP\]\*/i;
   const mapPatternDeviasNoAsterisks = /Devias\s*-\s*\[Server: Boss Event PvP\]/i;
 
-  // World Boss (NPC 922): qualquer mapa no Boss Event / Platinum, exceto Devias
-  const isBossEventServer = (c: string) => /\[Server:\s*(?:Boss Event PvP|Platinum PvP)\]/i.test(c);
-  
   const datePattern = /(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})/;
 
   for (const log of logs) {
@@ -83,7 +80,8 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
                         mapPatternDeviasSingleAsterisks.test(content) || 
                         mapPatternDeviasNoAsterisks.test(content);
 
-    const isWorldBossMap = isBossEventServer(content) && !isDeviasMap;
+    const isWorldBossMap =
+      /Raklion/i.test(content) && !isDeviasMap && !isPvPSquareMap;
     
     // If target event type is specified, filter by it
     if (targetEventType === 'boss_event' && !isPvPSquareMap) continue;
@@ -191,7 +189,7 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
   const singleLinePattern = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*-\s*:dagger:\s*\*{0,2}(\w+)\*{0,2}\s+matou\s+:skull:\s*\*{0,2}(\w+)\*{0,2}\s+no mapa\s+:map:\s*(.+)$/i;
   const validMapPvPSquare = /^\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server: (?:Boss Event PvP|Platinum PvP)\]\*{0,2}$/i;
   const validMapDevias = /^\*{0,2}Devias\*{0,2}\s*-\s*\*{0,2}\[Server: Boss Event PvP\]\*{0,2}$/i;
-  const validMapWorldBoss = /^\*{0,2}.+?\*{0,2}\s*-\s*\*{0,2}\[Server: (?:Boss Event PvP|Platinum PvP)\]\*{0,2}$/i;
+  const validMapWorldBoss = /^\*{0,2}.*Raklion.*$/i;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
