@@ -3,6 +3,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 export const EVENT_TYPE_OPTIONS = [
   { value: 'all', label: 'Todos Eventos' },
   { value: 'boss_event', label: 'Boss Event' },
+  { value: 'world_boss', label: 'World Boss' },
   { value: 'throne_conquest', label: 'Throne Conquest' },
   { value: 'arka_war', label: 'Arka War' },
 ];

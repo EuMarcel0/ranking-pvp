@@ -1,7 +1,7 @@
 import { PlayerStats } from '@/components/Scoreboard';
 import { z } from 'zod';
 
-export type EventType = 'boss_event' | 'throne_conquest';
+export type EventType = 'boss_event' | 'throne_conquest' | 'world_boss';
 
 export interface KillLog {
   killer: string;
@@ -62,6 +62,9 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
   const mapPatternDeviasDoubleAsterisks = /\*\*Devias\*\*\s*-\s*\*\*\[Server: Boss Event PvP\]\*\*/i;
   const mapPatternDeviasSingleAsterisks = /\*Devias\*\s*-\s*\*\[Server: Boss Event PvP\]\*/i;
   const mapPatternDeviasNoAsterisks = /Devias\s*-\s*\[Server: Boss Event PvP\]/i;
+
+  // World Boss (NPC 922): qualquer mapa no Boss Event / Platinum, exceto Devias
+  const isBossEventServer = (c: string) => /\[Server:\s*(?:Boss Event PvP|Platinum PvP)\]/i.test(c);
   
   const datePattern = /(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})/;
 
@@ -79,17 +82,24 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
     const isDeviasMap = mapPatternDeviasDoubleAsterisks.test(content) || 
                         mapPatternDeviasSingleAsterisks.test(content) || 
                         mapPatternDeviasNoAsterisks.test(content);
+
+    const isWorldBossMap = isBossEventServer(content) && !isDeviasMap;
     
     // If target event type is specified, filter by it
     if (targetEventType === 'boss_event' && !isPvPSquareMap) continue;
     if (targetEventType === 'throne_conquest' && !isDeviasMap) continue;
+    if (targetEventType === 'world_boss' && !isWorldBossMap) continue;
     
-    // If no target specified, accept any valid map
-    if (!targetEventType && !isPvPSquareMap && !isDeviasMap) continue;
+    // If no target specified, accept square, throne ou world boss open-world
+    if (!targetEventType && !isPvPSquareMap && !isDeviasMap && !isWorldBossMap) continue;
 
     // Detect event type from first valid entry
     if (matchedEntries === 0) {
-      detectedEventType = isDeviasMap ? 'throne_conquest' : 'boss_event';
+      detectedEventType = isDeviasMap
+        ? 'throne_conquest'
+        : isPvPSquareMap
+          ? 'boss_event'
+          : 'world_boss';
     }
 
     // Extract date for boss/throne label from first valid entry
@@ -99,7 +109,11 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
         const day = dateMatch[1];
         const month = dateMatch[2];
         const hour = parseInt(dateMatch[4]);
-        const labelPrefix = isDeviasMap ? 'throne' : 'boss';
+        const labelPrefix = isDeviasMap
+          ? 'throne'
+          : detectedEventType === 'world_boss'
+            ? 'world boss'
+            : 'boss';
         bossLabel = `${labelPrefix} ${day}/${month} ${hour} horas`;
       }
     }
@@ -177,6 +191,7 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
   const singleLinePattern = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*-\s*:dagger:\s*\*{0,2}(\w+)\*{0,2}\s+matou\s+:skull:\s*\*{0,2}(\w+)\*{0,2}\s+no mapa\s+:map:\s*(.+)$/i;
   const validMapPvPSquare = /^\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server: (?:Boss Event PvP|Platinum PvP)\]\*{0,2}$/i;
   const validMapDevias = /^\*{0,2}Devias\*{0,2}\s*-\s*\*{0,2}\[Server: Boss Event PvP\]\*{0,2}$/i;
+  const validMapWorldBoss = /^\*{0,2}.+?\*{0,2}\s*-\s*\*{0,2}\[Server: (?:Boss Event PvP|Platinum PvP)\]\*{0,2}$/i;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -195,6 +210,7 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
       // Check which map type this is
       const isPvPSquare = validMapPvPSquare.test(mapPart);
       const isDevias = validMapDevias.test(mapPart);
+      const isWorldBoss = !isDevias && validMapWorldBoss.test(mapPart);
       
       // If target event type is specified, filter by it
       if (targetEventType === 'boss_event' && !isPvPSquare) {
@@ -205,21 +221,33 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
         console.log(`[TXT Parser] Skipped (filtering for throne_conquest): "${mapPart}"`);
         continue;
       }
+      if (targetEventType === 'world_boss' && !isWorldBoss) {
+        console.log(`[TXT Parser] Skipped (filtering for world_boss): "${mapPart}"`);
+        continue;
+      }
       
-      // If no target specified, accept any valid map
-      if (!targetEventType && !isPvPSquare && !isDevias) {
+      // If no target specified, accept square, throne ou world boss
+      if (!targetEventType && !isPvPSquare && !isDevias && !isWorldBoss) {
         console.log(`[TXT Parser] Skipped (wrong map): "${mapPart}"`);
         continue;
       }
 
       // Detect event type from first valid entry
       if (matchedEntries === 0) {
-        detectedEventType = isDevias ? 'throne_conquest' : 'boss_event';
+        detectedEventType = isDevias
+          ? 'throne_conquest'
+          : isPvPSquare
+            ? 'boss_event'
+            : 'world_boss';
       }
 
       // Extract boss/throne label from first valid entry
       if (!bossLabel) {
-        const labelPrefix = isDevias ? 'throne' : 'boss';
+        const labelPrefix = isDevias
+          ? 'throne'
+          : detectedEventType === 'world_boss'
+            ? 'world boss'
+            : 'boss';
         bossLabel = `${labelPrefix} ${day}/${month} ${hour} horas`;
       }
 

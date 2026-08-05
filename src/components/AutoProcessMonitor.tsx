@@ -49,7 +49,7 @@ export const AutoProcessMonitor = () => {
   const [processingEvent, setProcessingEvent] = useState<string | null>(null);
   const { toast } = useToast();
 
-  const [manualEventType, setManualEventType] = useState<'boss_event' | 'throne_conquest'>('boss_event');
+  const [manualEventType, setManualEventType] = useState<'boss_event' | 'throne_conquest' | 'world_boss'>('boss_event');
   const [manualDate, setManualDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [manualBossHour, setManualBossHour] = useState<BossHourOption>(() => {
     const dow = new Date().getDay();
@@ -95,7 +95,7 @@ export const AutoProcessMonitor = () => {
 
   // Prefill killer/boss a partir de boss_kill_triggers quando possível
   useEffect(() => {
-    if (manualEventType !== 'boss_event' || !manualDate) return;
+    if ((manualEventType !== 'boss_event' && manualEventType !== 'world_boss') || !manualDate) return;
     const { hour, minute } = parseBossHour(manualBossHour);
     let cancelled = false;
 
@@ -106,7 +106,7 @@ export const AutoProcessMonitor = () => {
         .eq('match_date', manualDate)
         .eq('match_hour', hour)
         .eq('match_minute', minute)
-        .eq('event_type', 'boss_event')
+        .eq('event_type', manualEventType)
         .maybeSingle();
 
       if (cancelled || !data) return;
@@ -188,7 +188,7 @@ export const AutoProcessMonitor = () => {
           title: 'Detector executado',
           description:
             data?.mode === 'schedule_free'
-              ? 'Nenhum +1 nos NPCs 968/966 (baseline atualizado se necessário).'
+              ? 'Nenhum +1 nos NPCs 922/968/966 (baseline atualizado se necessário).'
               : 'Nenhuma mudança detectada nos bosses PvP.',
         });
       }
@@ -211,6 +211,7 @@ export const AutoProcessMonitor = () => {
     }
 
     const isThrone = manualEventType === 'throne_conquest';
+    const isWorldBoss = manualEventType === 'world_boss';
     const { hour, minute } = isThrone
       ? { hour: 21, minute: 36 }
       : parseBossHour(manualBossHour);
@@ -253,6 +254,7 @@ export const AutoProcessMonitor = () => {
         const killer = manualBossKiller.trim();
         if (killer) body.bossKiller = killer;
         if (manualBossNpcId) body.bossNpcId = Number(manualBossNpcId);
+        else if (isWorldBoss) body.bossNpcId = 922;
       }
 
       const { data, error } = await supabase.functions.invoke('auto-process-ranking', { body });
@@ -269,9 +271,10 @@ export const AutoProcessMonitor = () => {
         const killerInfo = !isThrone && postedKiller
           ? ` · 🐉 ${postedKiller}${postedNpcId ? ` — ${bossNpcLabel(postedNpcId)}` : ''}`
           : '';
+        const eventLabel = isThrone ? 'Throne' : isWorldBoss ? 'World Boss' : 'PvP Square';
         toast({
           title: "Sincronizado e postado!",
-          description: `${isThrone ? 'Throne' : 'PvP Square'} ${manualDate} ${timeLabel} — ${data.playersCount || data.playerCount || 0} jogadores${killerInfo}.`,
+          description: `${eventLabel} ${manualDate} ${timeLabel} — ${data.playersCount || data.playerCount || 0} jogadores${killerInfo}.`,
         });
         await fetchRecentMatches();
       } else if (data?.status === 'no_logs' || data?.noData) {
@@ -423,7 +426,7 @@ export const AutoProcessMonitor = () => {
             <div>
               <CardTitle>Monitoramento de Processamento Automático</CardTitle>
               <CardDescription className="mt-1">
-                Boss Event automático e genérico: qualquer +1 nos NPCs 968/966 dispara o post (sem horário fixo).
+                Automático e genérico: qualquer +1 nos NPCs 922 (World Boss), 968 e 966 dispara o post (sem horário fixo).
               </CardDescription>
             </div>
           </div>
@@ -434,7 +437,7 @@ export const AutoProcessMonitor = () => {
               onClick={handleRunBossDetector}
               disabled={detectingBoss}
               className="gap-2"
-              title="Consulta NPCs 968/966 (sem horário fixo). Qualquer +1 dispara sync+post"
+              title="Consulta NPCs 922/968/966 (sem horário fixo). Qualquer +1 dispara sync+post"
             >
               {detectingBoss ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
               {detectingBoss ? 'Detectando...' : 'Rodar detector'}
@@ -465,13 +468,19 @@ export const AutoProcessMonitor = () => {
               <Label>Tipo</Label>
               <Select
                 value={manualEventType}
-                onValueChange={(v) => setManualEventType(v as 'boss_event' | 'throne_conquest')}
+                onValueChange={(v) => {
+                  const next = v as 'boss_event' | 'throne_conquest' | 'world_boss';
+                  setManualEventType(next);
+                  if (next === 'world_boss') setManualBossNpcId('922');
+                  else if (next === 'boss_event') setManualBossNpcId('');
+                }}
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="boss_event">PvP Square (Boss)</SelectItem>
+                  <SelectItem value="world_boss">World Boss</SelectItem>
                   <SelectItem value="throne_conquest">Throne (Devias)</SelectItem>
                 </SelectContent>
               </Select>
@@ -487,7 +496,7 @@ export const AutoProcessMonitor = () => {
               />
             </div>
 
-            {manualEventType === 'boss_event' ? (
+            {manualEventType === 'boss_event' || manualEventType === 'world_boss' ? (
               <div className="space-y-1.5">
                 <Label>Hora início</Label>
                 <Select
@@ -538,7 +547,7 @@ export const AutoProcessMonitor = () => {
             </div>
           </div>
 
-          {manualEventType === 'boss_event' && (
+          {(manualEventType === 'boss_event' || manualEventType === 'world_boss') && (
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="manual-boss-killer">Boss Killer (personagem)</Label>

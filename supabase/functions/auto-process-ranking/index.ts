@@ -50,10 +50,10 @@ interface RequestBody {
   /** Fim da janela de busca em logs_pvp (BRT). Usado principalmente no Throne manual. */
   eventEndHour?: number;
   eventEndMinute?: number;
-  eventType?: 'boss_event' | 'throne_conquest';
+  eventType?: 'boss_event' | 'throne_conquest' | 'world_boss';
   testHomolog?: boolean;
   eventDate?: string; // 'YYYY-MM-DD' force a specific date (for homolog testing)
-  /** Killer do boss (NPC 968/966) — preenchido pelo detect-boss-kill */
+  /** Killer do boss (NPC 922/968/966) — preenchido pelo detect-boss-kill */
   bossKiller?: string;
   bossNpcId?: number;
   /** Hora/minuto gravados na partida (pode diferir da janela de busca de logs) */
@@ -61,8 +61,10 @@ interface RequestBody {
   matchMinuteOverride?: number;
 }
 
-const BOSS_NPC_IDS = [968, 966] as const;
+const BOSS_NPC_IDS = [922, 968, 966] as const;
+const WORLD_BOSS_NPC_ID = 922;
 const BOSS_NPC_NAMES: Record<number, string> = {
+  922: 'World Boss',
   966: '(Elite) Devil Sword',
   968: '(Elite) Devil Sorcerer',
 };
@@ -127,7 +129,7 @@ async function resolveBossKiller(
     .eq('match_date', opts.matchDate)
     .eq('match_hour', opts.matchHour)
     .eq('match_minute', opts.matchMinute)
-    .eq('event_type', 'boss_event')
+    .in('event_type', ['boss_event', 'world_boss'])
     .maybeSingle();
 
   if (trigger?.killer_name) {
@@ -295,77 +297,114 @@ function formatFogoAmigoTableLocal(entries: Array<{name: string; class_short?: s
   return table;
 }
 
-// Parser logic for Boss Event (PvP Square map)
-function parseExternalDbContentBoss(logs: ExternalLogEntry[]): ParseResult {
+const KILL_PATTERNS = [
+  /:dagger:\s*\*\*(\w+)\*\*\s*matou\s*:skull:\s*\*\*(\w+)\*\*/i,
+  /:dagger:\s*\*(\w+)\*\s*matou\s*:skull:\s*\*(\w+)\*/i,
+  /:dagger:\s*(\w+)\s+matou\s+:skull:\s*(\w+)\s+no mapa/i,
+] as const;
+
+function matchKill(content: string): { killer: string; victim: string } | null {
+  for (const pattern of KILL_PATTERNS) {
+    const m = content.match(pattern);
+    if (m) return { killer: m[1], victim: m[2] };
+  }
+  return null;
+}
+
+function isBossEventServerLog(content: string): boolean {
+  return /\[Server:\s*(?:Boss Event PvP|Platinum PvP)\]/i.test(content);
+}
+
+function isDeviasBossEventLog(content: string): boolean {
+  return /Devias/i.test(content) && /\[Server:\s*Boss Event PvP\]/i.test(content);
+}
+
+function isPvPSquareBossEventLog(content: string): boolean {
+  return (
+    /\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server:\s*(?:Boss Event PvP|Platinum PvP)\]\*{0,2}/i.test(
+      content,
+    )
+  );
+}
+
+/** World Boss (922): qualquer mapa do Boss Event PvP, exceto Devias (Throne). */
+function isWorldBossEventLog(content: string): boolean {
+  return isBossEventServerLog(content) && !isDeviasBossEventLog(content);
+}
+
+function accumulateKillStats(
+  logs: ExternalLogEntry[],
+  accepts: (content: string) => boolean,
+  labelPrefix: string,
+  logTag: string,
+): ParseResult {
   const players: Record<string, PlayerStats> = {};
   const killLogs: KillLog[] = [];
   let bossLabel = '';
   let matchedEntries = 0;
-
-  console.log(`[Auto Parser Boss] Processing ${logs.length} logs`);
-
-  const killPatternDoubleAsterisks = /:dagger:\s*\*\*(\w+)\*\*\s*matou\s*:skull:\s*\*\*(\w+)\*\*/i;
-  const mapPatternDoubleAsterisks = /\*\*PvP Square\*\*\s*-\s*\*\*\[Server: (?:Boss Event PvP|Platinum PvP)\]\*\*/i;
-
-  const killPatternSingleAsterisks = /:dagger:\s*\*(\w+)\*\s*matou\s*:skull:\s*\*(\w+)\*/i;
-  const mapPatternSingleAsterisks = /\*PvP Square\*\s*-\s*\*\[Server: (?:Boss Event PvP|Platinum PvP)\]\*/i;
-
-  const killPatternNoAsterisks = /:dagger:\s*(\w+)\s+matou\s+:skull:\s*(\w+)\s+no mapa/i;
-  const mapPatternNoAsterisks = /PvP Square\s*-\s*\[Server: (?:Boss Event PvP|Platinum PvP)\]/i;
-
   const datePattern = /(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})/;
+
+  console.log(`[${logTag}] Processing ${logs.length} logs`);
 
   for (const log of logs) {
     if (!log.content) continue;
-
     const content = log.content;
-
-    // STRICT: Only accept PvP Square map for Boss Events
-    const hasValidMap = mapPatternDoubleAsterisks.test(content) ||
-      mapPatternSingleAsterisks.test(content) ||
-      mapPatternNoAsterisks.test(content);
-
-    if (!hasValidMap) continue;
+    if (!accepts(content)) continue;
 
     if (!bossLabel) {
       const dateMatch = content.match(datePattern);
       if (dateMatch) {
         const [, day, month, year, hour] = dateMatch;
-        bossLabel = `BOSSx2 ${day}/${month}/${year} ${hour}H`;
+        bossLabel = `${labelPrefix} ${day}/${month}/${year} ${hour}H`;
       }
     }
 
-    let killMatch = content.match(killPatternDoubleAsterisks);
-    if (!killMatch) killMatch = content.match(killPatternSingleAsterisks);
-    if (!killMatch) killMatch = content.match(killPatternNoAsterisks);
+    const kill = matchKill(content);
+    if (!kill) continue;
 
-    if (killMatch) {
-      const killer = killMatch[1];
-      const victim = killMatch[2];
-
-      matchedEntries++;
-
-      if (!players[killer]) {
-        players[killer] = { name: killer, kills: 0, deaths: 0, kda: 0 };
-      }
-      players[killer].kills++;
-
-      if (!players[victim]) {
-        players[victim] = { name: victim, kills: 0, deaths: 0, kda: 0 };
-      }
-      players[victim].deaths++;
-
-      killLogs.push({ killer, victim });
+    matchedEntries++;
+    if (!players[kill.killer]) {
+      players[kill.killer] = { name: kill.killer, kills: 0, deaths: 0, kda: 0 };
     }
+    players[kill.killer].kills++;
+
+    if (!players[kill.victim]) {
+      players[kill.victim] = { name: kill.victim, kills: 0, deaths: 0, kda: 0 };
+    }
+    players[kill.victim].deaths++;
+
+    killLogs.push(kill);
   }
 
   for (const player of Object.values(players)) {
     player.kda = player.deaths === 0 ? player.kills : parseFloat((player.kills / player.deaths).toFixed(2));
   }
 
-  console.log(`[Auto Parser Boss] Matched ${matchedEntries} valid entries (PvP Square), ${Object.keys(players).length} unique players`);
+  console.log(
+    `[${logTag}] Matched ${matchedEntries} valid entries, ${Object.keys(players).length} unique players`,
+  );
 
   return { players, bossLabel, killLogs };
+}
+
+// Parser logic for Boss Event (PvP Square map)
+function parseExternalDbContentBoss(logs: ExternalLogEntry[]): ParseResult {
+  return accumulateKillStats(
+    logs,
+    isPvPSquareBossEventLog,
+    'BOSSx2',
+    'Auto Parser Boss',
+  );
+}
+
+// Parser logic for World Boss (NPC 922) — mapas open-world no Boss Event PvP
+function parseExternalDbContentWorldBoss(logs: ExternalLogEntry[]): ParseResult {
+  return accumulateKillStats(
+    logs,
+    isWorldBossEventLog,
+    'World Boss',
+    'Auto Parser WorldBoss',
+  );
 }
 
 // Parser logic for Throne Conquest (Devias map)
@@ -481,26 +520,21 @@ function calculateBestKillStreak(killLogs: KillLog[], bannedPlayers: Set<string>
 // Extrai timestamp do último kill válido no mapa do evento
 function getLastKillTimestamp(
   logs: ExternalLogEntry[],
-  eventType: 'boss_event' | 'throne_conquest',
+  eventType: 'boss_event' | 'throne_conquest' | 'world_boss',
+  bossNpcId?: number | null,
 ): number | null {
   if (!logs || logs.length === 0) return null;
 
-  const mapPatterns = eventType === 'throne_conquest'
-    ? [
-        /\*\*Devias\*\*\s*-\s*\*\*\[Server: Boss Event PvP\]\*\*/i,
-        /\*Devias\*\s*-\s*\*\[Server: Boss Event PvP\]\*/i,
-        /Devias\s*-\s*\[Server: Boss Event PvP\]/i,
-      ]
-    : [
-        /\*\*PvP Square\*\*\s*-\s*\*\*\[Server: (?:Boss Event PvP|Platinum PvP)\]\*\*/i,
-        /\*PvP Square\*\s*-\s*\*\[Server: (?:Boss Event PvP|Platinum PvP)\]\*/i,
-        /PvP Square\s*-\s*\[Server: (?:Boss Event PvP|Platinum PvP)\]/i,
-      ];
+  const accepts =
+    eventType === 'throne_conquest'
+      ? isDeviasBossEventLog
+      : eventType === 'world_boss' || bossNpcId === WORLD_BOSS_NPC_ID
+        ? isWorldBossEventLog
+        : isPvPSquareBossEventLog;
 
   for (const log of logs) {
     if (!log.content) continue;
-    const hasValidMap = mapPatterns.some((pattern) => pattern.test(log.content));
-    if (!hasValidMap) continue;
+    if (!accepts(log.content)) continue;
 
     const ts = parseLogTimestampMs(log);
     if (ts !== null) return ts;
@@ -524,7 +558,7 @@ function shouldPostpone(
   return idleMin < idleMinutesRequired;
 }
 
-function getEventTimeRange(eventHour?: number, eventMinute: number = 0, eventType: 'boss_event' | 'throne_conquest' = 'boss_event'): { startDate: string; endDate: string; matchDate: string; matchHour: number; localStartDate: string; localEndDate: string } {
+function getEventTimeRange(eventHour?: number, eventMinute: number = 0, eventType: 'boss_event' | 'throne_conquest' | 'world_boss' = 'boss_event'): { startDate: string; endDate: string; matchDate: string; matchHour: number; localStartDate: string; localEndDate: string } {
   // Brazil timezone offset (UTC-3)
   const BRAZIL_OFFSET = -3;
   
@@ -825,7 +859,7 @@ Deno.serve(async (req) => {
     }
 
     // Check if we should postpone based on inactivity since last kill
-    const lastKillAtMs = getLastKillTimestamp(logs, eventType);
+    const lastKillAtMs = getLastKillTimestamp(logs, eventType, earlyBossNpcId);
     const idleMin = lastKillAtMs !== null
       ? Math.floor((brtNowMs() - lastKillAtMs) / 60000)
       : null;
@@ -844,19 +878,27 @@ Deno.serve(async (req) => {
       };
     }
 
-    // Parse logs using the appropriate parser based on event type
-    const parseResult = eventType === 'throne_conquest'
-      ? parseExternalDbContentThrone(logs)
-      : parseExternalDbContentBoss(logs);
+    const isWorldBossEvent =
+      eventType === 'world_boss' || earlyBossNpcId === WORLD_BOSS_NPC_ID;
+
+    // Parse logs using the appropriate parser based on event type / NPC
+    const parseResult =
+      eventType === 'throne_conquest'
+        ? parseExternalDbContentThrone(logs)
+        : isWorldBossEvent
+          ? parseExternalDbContentWorldBoss(logs)
+          : parseExternalDbContentBoss(logs);
 
     if (Object.keys(parseResult.players).length === 0) {
       console.log(`[Auto Process] No valid player data found after parsing for ${eventType}`);
       return { success: true, status: 'no_players', message: 'No valid player data', matchDate, matchHour, eventType };
     }
 
-    const bossLabel = parseResult.bossLabel || (eventType === 'throne_conquest' 
+    const bossLabel = parseResult.bossLabel || (eventType === 'throne_conquest'
       ? `Throne ${matchDate} ${matchHour}H`
-      : `BOSSx2 ${matchDate} ${matchHour}H`);
+      : isWorldBossEvent
+        ? `World Boss ${matchDate} ${matchHour}H`
+        : `BOSSx2 ${matchDate} ${matchHour}H`);
 
     let bossKiller =
       typeof body.bossKiller === 'string' && body.bossKiller.trim()
@@ -865,10 +907,12 @@ Deno.serve(async (req) => {
     let bossNpcId =
       typeof body.bossNpcId === 'number' && Number.isFinite(body.bossNpcId)
         ? body.bossNpcId
-        : null;
+        : isWorldBossEvent
+          ? WORLD_BOSS_NPC_ID
+          : null;
 
     // Manual sync / reprocess: resolve killer se não veio no body
-    if (eventType === 'boss_event' && !bossKiller) {
+    if ((eventType === 'boss_event' || eventType === 'world_boss') && !bossKiller) {
       const resolved = await resolveBossKiller(internalClient, {
         matchDate,
         matchHour,
@@ -973,7 +1017,7 @@ Deno.serve(async (req) => {
     // Boss event: descontar fogo amigo (mesma guild) das kills/deaths/KDA
     // para alinhar com o site (get_ranking_geral). Throne/Arka mantêm contagem bruta.
     // Os kill_logs no banco continuam intactos (preserva ranking de Fogo Amigo).
-    if (eventType === 'boss_event') {
+    if (eventType === 'boss_event' || eventType === 'world_boss') {
       const ffKills: Record<string, number> = {};
       const ffDeaths: Record<string, number> = {};
       for (const log of parseResult.killLogs) {
@@ -1110,10 +1154,15 @@ Deno.serve(async (req) => {
       const formattedHour = `${String(matchHour).padStart(2, '0')}:${String(matchMinuteForStore).padStart(2, '0')}`;
 
       const isThrone = eventType === 'throne_conquest';
-      const rankingTitle = isThrone ? '🏆 Ranking Throne Conquest' : '🏆 Ranking BOSS Diário';
+      const isWorldBoss = eventType === 'world_boss' || bossNpcId === WORLD_BOSS_NPC_ID;
+      const rankingTitle = isThrone
+        ? '🏆 Ranking Throne Conquest'
+        : isWorldBoss
+          ? '🏆 Ranking World Boss'
+          : '🏆 Ranking BOSS Diário';
       const reiTitle = isThrone ? '👑 REI DO TRONO' : '👑 REI DO PvP';
-      const embedColor = isThrone ? 0xF59E0B : 0x10B981;
-      const eventLabel = isThrone ? 'Throne Conquest' : 'Boss/evento';
+      const embedColor = isThrone ? 0xF59E0B : isWorldBoss ? 0x8B5CF6 : 0x10B981;
+      const eventLabel = isThrone ? 'Throne Conquest' : isWorldBoss ? 'World Boss' : 'Boss/evento';
 
       const SEP = '━━━━━━━━━━━━━━━━━━';
 

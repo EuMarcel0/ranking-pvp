@@ -54,7 +54,7 @@ Deno.serve(async (req) => {
     const { searchParams } = new URL(req.url);
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
-    const mapFilter = searchParams.get('map'); // 'devias' or 'pvp_square'
+    const mapFilter = searchParams.get('map'); // 'devias' | 'pvp_square' | 'world_boss'
 
     console.log(`Fetching external logs with filters: startDate=${startDate}, endDate=${endDate}, map=${mapFilter}`);
 
@@ -100,6 +100,11 @@ Deno.serve(async (req) => {
         query = query.ilike('content', '%Devias%[Server: Boss Event PvP]%');
       } else if (mapFilter === 'pvp_square') {
         query = query.or('content.ilike.%PvP Square%[Server: Boss Event PvP]%,content.ilike.%PvP Square%[Server: Platinum PvP]%');
+      } else if (mapFilter === 'world_boss') {
+        // World Boss: kills no Boss Event / Platinum (qualquer mapa; Devias filtrado no parser)
+        query = query.or(
+          'content.ilike.%[Server: Boss Event PvP]%,content.ilike.%[Server: Platinum PvP]%',
+        );
       }
 
       const { data: logs, error: logsError } = await query;

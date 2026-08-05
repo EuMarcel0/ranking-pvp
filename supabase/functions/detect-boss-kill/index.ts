@@ -1,6 +1,7 @@
 /**
- * Detecta morte dos bosses PvP Square via ranking monster_kill do VortexMU (NPC 968/966).
- * Sem cronograma fixo: qualquer +1 em 966/968 dispara "Sincronizar e postar".
+ * Detecta morte dos bosses PvP via ranking monster_kill do VortexMU
+ * (NPC 968/966 Square + 922 World Boss).
+ * Sem cronograma fixo: qualquer +1 dispara "Sincronizar e postar".
  * Janela de logs = lookback a partir de agora (BRT).
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -10,17 +11,24 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const BOSS_NPC_IDS = [968, 966] as const;
+const BOSS_NPC_IDS = [922, 968, 966] as const;
 const BOSS_NPC_NAMES: Record<number, string> = {
+  922: 'World Boss',
   966: '(Elite) Devil Sword',
   968: '(Elite) Devil Sorcerer',
 };
+const WORLD_BOSS_NPC_ID = 922;
 const VORTEX_URL = 'https://vortexmu.net/rankings/monster_kill/load_ranking_data';
 
-/** Quanto tempo de logs_pvp buscar para trás ao postar (cobre o evento inteiro) */
+/** Lookback padrão (Boss Square). World Boss costuma durar mais. */
 const LOG_LOOKBACK_MINUTES = 150;
+const WORLD_BOSS_LOOKBACK_MINUTES = 240;
 /** Evita reprocessar o mesmo npc se o poll oscilar no mesmo minuto */
 const DEDUPE_MINUTES = 3;
+
+function lookbackMinutesForNpc(npcId: number): number {
+  return npcId === WORLD_BOSS_NPC_ID ? WORLD_BOSS_LOOKBACK_MINUTES : LOG_LOOKBACK_MINUTES;
+}
 
 function bossNpcLabel(npcId: number): string {
   return BOSS_NPC_NAMES[npcId] ?? `NPC ${npcId}`;
@@ -162,6 +170,10 @@ function detectKiller(
   return null;
 }
 
+function eventTypeForNpc(npcId: number): 'boss_event' | 'world_boss' {
+  return npcId === WORLD_BOSS_NPC_ID ? 'world_boss' : 'boss_event';
+}
+
 async function recentlyPostedForNpc(
   client: SupabaseClient,
   npcId: number,
@@ -172,7 +184,7 @@ async function recentlyPostedForNpc(
     .from('boss_kill_triggers')
     .select('id')
     .eq('npc_id', npcId)
-    .eq('event_type', 'boss_event')
+    .eq('event_type', eventTypeForNpc(npcId))
     .not('posted_at', 'is', null)
     .gte('posted_at', since)
     .limit(1);
@@ -190,7 +202,7 @@ async function postPendingTrigger(
   const endMinute = brt.getMinutes();
 
   // Início da busca de logs = lookback a partir de agora (independente de horário fixo)
-  const start = addMinutes(brt, -LOG_LOOKBACK_MINUTES);
+  const start = addMinutes(brt, -lookbackMinutesForNpc(pending.npc_id));
   // Se virou o dia no lookback, usa 00:00 do dia da detecção para não misturar dias
   const startSameDay =
     ymd(start) === pending.match_date
@@ -223,7 +235,7 @@ async function postPendingTrigger(
       eventMinute,
       eventEndHour: endHour,
       eventEndMinute: endMinute,
-      eventType: 'boss_event',
+      eventType: eventTypeForNpc(pending.npc_id),
       eventDate: pending.match_date,
       // Identidade da partida = horário da detecção (não o lookback)
       matchHourOverride: pending.match_hour,
@@ -334,13 +346,15 @@ Deno.serve(async (req) => {
       const detectHour = brt.getHours();
       const detectMinute = brt.getMinutes();
 
+      const eventType = eventTypeForNpc(npcId);
+
       const { data: existingTrigger } = await client
         .from('boss_kill_triggers')
         .select('id, posted_at')
         .eq('match_date', today)
         .eq('match_hour', detectHour)
         .eq('match_minute', detectMinute)
-        .eq('event_type', 'boss_event')
+        .eq('event_type', eventType)
         .eq('npc_id', npcId)
         .maybeSingle();
 
@@ -358,7 +372,7 @@ Deno.serve(async (req) => {
           match_date: today,
           match_hour: detectHour,
           match_minute: detectMinute,
-          event_type: 'boss_event',
+          event_type: eventType,
           npc_id: npcId,
           killer_name: killer.name,
           post_after: nowIso,
@@ -415,6 +429,7 @@ Deno.serve(async (req) => {
         mode: 'schedule_free',
         brt: brt.toISOString(),
         lookbackMinutes: LOG_LOOKBACK_MINUTES,
+        worldBossLookbackMinutes: WORLD_BOSS_LOOKBACK_MINUTES,
         npcs: npcResults,
         triggered: triggeredList[0] ?? null,
         triggeredAll: triggeredList,
