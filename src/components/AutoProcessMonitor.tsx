@@ -186,9 +186,10 @@ export const AutoProcessMonitor = () => {
       } else {
         toast({
           title: 'Detector executado',
-          description: data?.window
-            ? `Janela ativa ${data.window.hour}:${String(data.window.minute).padStart(2, '0')} — nenhum +1 nos NPCs 968/966.`
-            : 'Fora da janela de Boss Event (baseline atualizado se necessário).',
+          description:
+            data?.mode === 'schedule_free'
+              ? 'Nenhum +1 nos NPCs 968/966 (baseline atualizado se necessário).'
+              : 'Nenhuma mudança detectada nos bosses PvP.',
         });
       }
     } catch (error) {
@@ -422,7 +423,7 @@ export const AutoProcessMonitor = () => {
             <div>
               <CardTitle>Monitoramento de Processamento Automático</CardTitle>
               <CardDescription className="mt-1">
-                Boss Event automático via detector de killer (NPC 968/966). Crons/watchdog antigos desativados.
+                Boss Event automático e genérico: qualquer +1 nos NPCs 968/966 dispara o post (sem horário fixo).
               </CardDescription>
             </div>
           </div>
@@ -433,7 +434,7 @@ export const AutoProcessMonitor = () => {
               onClick={handleRunBossDetector}
               disabled={detectingBoss}
               className="gap-2"
-              title="Consulta NPCs 968/966 no VortexMU e, se houver +1 kill, sincroniza e posta"
+              title="Consulta NPCs 968/966 (sem horário fixo). Qualquer +1 dispara sync+post"
             >
               {detectingBoss ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
               {detectingBoss ? 'Detectando...' : 'Rodar detector'}

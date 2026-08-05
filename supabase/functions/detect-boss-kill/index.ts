@@ -1,8 +1,7 @@
 /**
- * Detecta morte do boss PvP Square via ranking monster_kill do VortexMU (NPC 968/966).
- * Quando detecta +1 kill, dispara imediatamente o fluxo "Sincronizar e postar".
- *
- * Único mecanismo de postagem automática do Boss Event (crons/watchdog antigos desativados).
+ * Detecta morte dos bosses PvP Square via ranking monster_kill do VortexMU (NPC 968/966).
+ * Sem cronograma fixo: qualquer +1 em 966/968 dispara "Sincronizar e postar".
+ * Janela de logs = lookback a partir de agora (BRT).
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -18,10 +17,10 @@ const BOSS_NPC_NAMES: Record<number, string> = {
 };
 const VORTEX_URL = 'https://vortexmu.net/rankings/monster_kill/load_ranking_data';
 
-/** Janela máxima após início do evento (min) para aceitar detecção */
-const MAX_WINDOW_MIN = 120;
-/** Só tenta detectar após X min do início (evita ruído no começo) */
-const MIN_ELAPSED_MIN = 10;
+/** Quanto tempo de logs_pvp buscar para trás ao postar (cobre o evento inteiro) */
+const LOG_LOOKBACK_MINUTES = 150;
+/** Evita reprocessar o mesmo npc se o poll oscilar no mesmo minuto */
+const DEDUPE_MINUTES = 3;
 
 function bossNpcLabel(npcId: number): string {
   return BOSS_NPC_NAMES[npcId] ?? `NPC ${npcId}`;
@@ -30,11 +29,6 @@ function bossNpcLabel(npcId: number): string {
 interface MonsterEntry {
   name: string;
   count: number;
-}
-
-interface EventWindow {
-  hour: number;
-  minute: number;
 }
 
 interface PendingTrigger {
@@ -58,41 +52,8 @@ function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function getBossWindows(brt: Date): EventWindow[] {
-  const dow = brt.getDay(); // 0=Dom .. 6=Sáb
-  const list: EventWindow[] = [];
-
-  if (dow === 1) {
-    // Segunda: 21:00 e 22:00
-    list.push({ hour: 21, minute: 0 });
-    list.push({ hour: 22, minute: 0 });
-  } else {
-    // Demais dias: primeiro boss às 19:00 (antes era 20:00)
-    list.push({ hour: 19, minute: 0 });
-    // Terça/Quinta: segundo boss 22:30; demais 22:00
-    if (dow === 2 || dow === 4) {
-      list.push({ hour: 22, minute: 30 });
-    } else {
-      list.push({ hour: 22, minute: 0 });
-    }
-  }
-
-  return list;
-}
-
-function activeBossWindow(brt: Date): (EventWindow & { elapsedMin: number; date: string }) | null {
-  const today = ymd(brt);
-  const windows = getBossWindows(brt);
-
-  for (const w of windows) {
-    const start = new Date(brt);
-    start.setHours(w.hour, w.minute, 0, 0);
-    const elapsedMin = Math.floor((brt.getTime() - start.getTime()) / 60000);
-    if (elapsedMin >= MIN_ELAPSED_MIN && elapsedMin <= MAX_WINDOW_MIN) {
-      return { ...w, elapsedMin, date: today };
-    }
-  }
-  return null;
+function addMinutes(d: Date, minutes: number): Date {
+  return new Date(d.getTime() + minutes * 60_000);
 }
 
 async function fetchMonsterRanking(npcId: number): Promise<MonsterEntry[]> {
@@ -166,10 +127,11 @@ async function saveBaseline(
   if (error) throw new Error(`baseline save: ${error.message}`);
 }
 
+/** Qualquer aumento de um único personagem = boss morto (API pode atrasar e vir +1 ou mais). */
 function detectKiller(
   baseline: Map<string, number>,
   current: MonsterEntry[],
-): { name: string; prev: number; next: number } | null {
+): { name: string; prev: number; next: number; delta: number } | null {
   if (baseline.size === 0) return null;
 
   const increases: Array<{ name: string; prev: number; next: number; delta: number }> = [];
@@ -186,12 +148,8 @@ function detectKiller(
     }
   }
 
-  if (increases.length === 1 && increases[0].delta === 1) {
-    return {
-      name: increases[0].name,
-      prev: increases[0].prev,
-      next: increases[0].next,
-    };
+  if (increases.length === 1 && increases[0].delta >= 1) {
+    return increases[0];
   }
 
   if (increases.length > 0) {
@@ -204,6 +162,23 @@ function detectKiller(
   return null;
 }
 
+async function recentlyPostedForNpc(
+  client: SupabaseClient,
+  npcId: number,
+  withinMinutes: number,
+): Promise<boolean> {
+  const since = new Date(Date.now() - withinMinutes * 60_000).toISOString();
+  const { data } = await client
+    .from('boss_kill_triggers')
+    .select('id')
+    .eq('npc_id', npcId)
+    .eq('event_type', 'boss_event')
+    .not('posted_at', 'is', null)
+    .gte('posted_at', since)
+    .limit(1);
+  return (data?.length ?? 0) > 0;
+}
+
 async function postPendingTrigger(
   supabaseUrl: string,
   serviceKey: string,
@@ -214,10 +189,23 @@ async function postPendingTrigger(
   const endHour = brt.getHours();
   const endMinute = brt.getMinutes();
 
+  // Início da busca de logs = lookback a partir de agora (independente de horário fixo)
+  const start = addMinutes(brt, -LOG_LOOKBACK_MINUTES);
+  // Se virou o dia no lookback, usa 00:00 do dia da detecção para não misturar dias
+  const startSameDay =
+    ymd(start) === pending.match_date
+      ? start
+      : new Date(brt.getFullYear(), brt.getMonth(), brt.getDate(), 0, 0, 0, 0);
+
+  const eventHour = startSameDay.getHours();
+  const eventMinute = startSameDay.getMinutes();
+
   console.log(
     `[DetectBossKill] Posting: ${pending.killer_name} ` +
-      `${bossNpcLabel(pending.npc_id)} window=${pending.match_date} ` +
-      `${pending.match_hour}:${String(pending.match_minute).padStart(2, '0')}`,
+      `${bossNpcLabel(pending.npc_id)} detected=${pending.match_date} ` +
+      `${pending.match_hour}:${String(pending.match_minute).padStart(2, '0')} ` +
+      `logs=${String(eventHour).padStart(2, '0')}:${String(eventMinute).padStart(2, '0')}→` +
+      `${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(2, '0')}`,
   );
 
   const processRes = await fetch(`${supabaseUrl}/functions/v1/auto-process-ranking`, {
@@ -231,12 +219,15 @@ async function postPendingTrigger(
       attempt: 3,
       forceProcess: true,
       forceReprocess: true,
-      eventHour: pending.match_hour,
-      eventMinute: pending.match_minute,
+      eventHour,
+      eventMinute,
       eventEndHour: endHour,
       eventEndMinute: endMinute,
       eventType: 'boss_event',
       eventDate: pending.match_date,
+      // Identidade da partida = horário da detecção (não o lookback)
+      matchHourOverride: pending.match_hour,
+      matchMinuteOverride: pending.match_minute,
       bossKiller: pending.killer_name,
       bossNpcId: pending.npc_id,
     }),
@@ -264,12 +255,18 @@ async function postPendingTrigger(
     ok: true,
     npcId: pending.npc_id,
     killer: pending.killer_name,
-    window: {
+    boss: bossNpcLabel(pending.npc_id),
+    detected: {
       date: pending.match_date,
       hour: pending.match_hour,
       minute: pending.match_minute,
     },
-    end: { hour: endHour, minute: endMinute },
+    logWindow: {
+      startHour: eventHour,
+      startMinute: eventMinute,
+      endHour,
+      endMinute,
+    },
     processStatus: processRes.status,
     process: processJson,
   };
@@ -286,11 +283,11 @@ Deno.serve(async (req) => {
     const client = createClient(supabaseUrl, serviceKey);
 
     const brt = brtNow();
-    const window = activeBossWindow(brt);
+    const today = ymd(brt);
     const npcResults: Array<Record<string, unknown>> = [];
-    let triggered: Record<string, unknown> | null = null;
+    const triggeredList: Array<Record<string, unknown>> = [];
 
-    // Drena postagens pendentes (ex.: agendadas no delay antigo de 4 min)
+    // Drena postagens pendentes
     const { data: dueRows, error: dueErr } = await client
       .from('boss_kill_triggers')
       .select('id, match_date, match_hour, match_minute, npc_id, killer_name')
@@ -302,10 +299,7 @@ Deno.serve(async (req) => {
 
     for (const row of (dueRows ?? []) as PendingTrigger[]) {
       const result = await postPendingTrigger(supabaseUrl, serviceKey, client, row, brt);
-      if (result.ok) {
-        triggered = result;
-        break;
-      }
+      if (result.ok) triggeredList.push(result);
     }
 
     for (const npcId of BOSS_NPC_IDS) {
@@ -313,10 +307,7 @@ Deno.serve(async (req) => {
       const baseline = await loadBaseline(client, npcId);
       const isSeed = baseline.size === 0;
 
-      let killer: ReturnType<typeof detectKiller> = null;
-      if (!isSeed && window) {
-        killer = detectKiller(baseline, current);
-      }
+      const killer = !isSeed ? detectKiller(baseline, current) : null;
 
       const npcResult: Record<string, unknown> = {
         npcId,
@@ -326,20 +317,31 @@ Deno.serve(async (req) => {
         killer: killer?.name ?? null,
       };
 
-      if (!killer || !window || triggered) {
+      if (!killer) {
         await saveBaseline(client, npcId, current);
-        if (triggered && killer) npcResult.skipped = 'already_posted_this_run';
         npcResults.push(npcResult);
         continue;
       }
 
+      if (await recentlyPostedForNpc(client, npcId, DEDUPE_MINUTES)) {
+        await saveBaseline(client, npcId, current);
+        npcResult.skipped = 'recently_posted_same_npc';
+        npcResults.push(npcResult);
+        continue;
+      }
+
+      // Identidade do evento = momento da detecção (BRT)
+      const detectHour = brt.getHours();
+      const detectMinute = brt.getMinutes();
+
       const { data: existingTrigger } = await client
         .from('boss_kill_triggers')
         .select('id, posted_at')
-        .eq('match_date', window.date)
-        .eq('match_hour', window.hour)
-        .eq('match_minute', window.minute)
+        .eq('match_date', today)
+        .eq('match_hour', detectHour)
+        .eq('match_minute', detectMinute)
         .eq('event_type', 'boss_event')
+        .eq('npc_id', npcId)
         .maybeSingle();
 
       if (existingTrigger) {
@@ -353,9 +355,9 @@ Deno.serve(async (req) => {
       const { data: lockRow, error: lockErr } = await client
         .from('boss_kill_triggers')
         .insert({
-          match_date: window.date,
-          match_hour: window.hour,
-          match_minute: window.minute,
+          match_date: today,
+          match_hour: detectHour,
+          match_minute: detectMinute,
           event_type: 'boss_event',
           npc_id: npcId,
           killer_name: killer.name,
@@ -366,6 +368,7 @@ Deno.serve(async (req) => {
         .single();
 
       if (lockErr || !lockRow) {
+        // Colisão de unique (mesmo minuto): tenta com +1 min lógico via update path no próximo poll
         console.log('[DetectBossKill] Trigger lock failed:', lockErr?.message);
         npcResult.skipped = 'lock_failed';
         npcResults.push(npcResult);
@@ -373,9 +376,10 @@ Deno.serve(async (req) => {
       }
 
       console.log(
-        `[DetectBossKill] Boss kill detected: ${killer.name} boss=${bossNpcLabel(npcId)} (${npcId}) ` +
-          `window=${window.date} ${window.hour}:${String(window.minute).padStart(2, '0')} ` +
-          `(${killer.prev}->${killer.next})`,
+        `[DetectBossKill] Boss kill detected (schedule-free): ${killer.name} ` +
+          `boss=${bossNpcLabel(npcId)} (${npcId}) ` +
+          `at=${today} ${detectHour}:${String(detectMinute).padStart(2, '0')} ` +
+          `(${killer.prev}->${killer.next}, delta=${killer.delta})`,
       );
 
       const result = await postPendingTrigger(
@@ -384,9 +388,9 @@ Deno.serve(async (req) => {
         client,
         {
           id: lockRow.id,
-          match_date: window.date,
-          match_hour: window.hour,
-          match_minute: window.minute,
+          match_date: today,
+          match_hour: detectHour,
+          match_minute: detectMinute,
           npc_id: npcId,
           killer_name: killer.name,
         },
@@ -394,7 +398,6 @@ Deno.serve(async (req) => {
       );
 
       if (!result.ok) {
-        // Libera lock e NÃO atualiza baseline → próximo poll tenta de novo
         await client.from('boss_kill_triggers').delete().eq('id', lockRow.id);
         npcResult.processFailed = result.process;
         npcResults.push(npcResult);
@@ -402,24 +405,19 @@ Deno.serve(async (req) => {
       }
 
       await saveBaseline(client, npcId, current);
-      triggered = result;
+      triggeredList.push(result);
       npcResults.push(npcResult);
     }
 
     return new Response(
       JSON.stringify({
         success: true,
+        mode: 'schedule_free',
         brt: brt.toISOString(),
-        window: window
-          ? {
-              date: window.date,
-              hour: window.hour,
-              minute: window.minute,
-              elapsedMin: window.elapsedMin,
-            }
-          : null,
+        lookbackMinutes: LOG_LOOKBACK_MINUTES,
         npcs: npcResults,
-        triggered,
+        triggered: triggeredList[0] ?? null,
+        triggeredAll: triggeredList,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );

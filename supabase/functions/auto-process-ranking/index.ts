@@ -56,6 +56,9 @@ interface RequestBody {
   /** Killer do boss (NPC 968/966) — preenchido pelo detect-boss-kill */
   bossKiller?: string;
   bossNpcId?: number;
+  /** Hora/minuto gravados na partida (pode diferir da janela de busca de logs) */
+  matchHourOverride?: number;
+  matchMinuteOverride?: number;
 }
 
 const BOSS_NPC_IDS = [968, 966] as const;
@@ -156,7 +159,7 @@ async function resolveBossKiller(
         }
       }
 
-      if (increases.length === 1 && increases[0].delta === 1) {
+      if (increases.length === 1 && increases[0].delta >= 1) {
         console.log(`[Auto Process] Boss killer from Vortex diff: ${increases[0].name} npc=${npcId}`);
         return { killer: increases[0].name, npcId };
       }
@@ -649,6 +652,14 @@ Deno.serve(async (req) => {
         : hasCustomEnd
           ? 0
           : undefined;
+    const storedMatchHour =
+      typeof body.matchHourOverride === 'number' && body.matchHourOverride >= 0 && body.matchHourOverride <= 23
+        ? body.matchHourOverride
+        : undefined;
+    const storedMatchMinute =
+      typeof body.matchMinuteOverride === 'number' && body.matchMinuteOverride >= 0 && body.matchMinuteOverride <= 59
+        ? body.matchMinuteOverride
+        : undefined;
     
     console.log(`[Auto Process] Starting automatic ranking processing... Attempt: ${attempt}, Force: ${forceProcess}, Reprocess: ${forceReprocess}, EventHour: ${eventHour}, EventMinute: ${eventMinute}, EventType: ${eventType}, End: ${eventEndHour ?? '-'}:${eventEndMinute ?? '-'}`);
 
@@ -657,59 +668,81 @@ Deno.serve(async (req) => {
     const internalClient = createClient(internalSupabaseUrl, internalServiceKey);
 
     let { startDate, endDate, matchDate, matchHour, localStartDate, localEndDate } = getEventTimeRange(eventHour, eventMinute, eventType);
+    // Logs usam eventHour/eventMinute (lookback). Partida pode gravar horário da detecção.
+    const logStartHour = typeof eventHour === 'number' ? eventHour : matchHour;
+    const logStartMinute = eventMinute;
+    if (storedMatchHour !== undefined) matchHour = storedMatchHour;
+    let matchMinuteForStore = storedMatchMinute !== undefined ? storedMatchMinute : eventMinute;
 
     // Override matchDate if eventDate provided (homolog testing for past events)
     if (body.eventDate && /^\d{4}-\d{2}-\d{2}$/.test(body.eventDate)) {
       const overrideDate = body.eventDate;
-      // Recompute UTC startDate/endDate from overrideDate + matchHour/eventMinute (BRT = UTC-3)
-      const sUtc = new Date(`${overrideDate}T${String(matchHour).padStart(2,'0')}:${String(eventMinute).padStart(2,'0')}:00-03:00`);
-      let lEndH = matchHour, lEndM = 59;
+      // Janela de LOGS = lookback (logStart*), não o horário armazenado da partida
+      const sUtc = new Date(`${overrideDate}T${String(logStartHour).padStart(2,'0')}:${String(logStartMinute).padStart(2,'0')}:00-03:00`);
+      let lEndH = logStartHour, lEndM = 59;
       if (hasCustomEnd && eventEndHour !== undefined && eventEndMinute !== undefined) {
         lEndH = eventEndHour;
         lEndM = eventEndMinute;
       } else if (eventType === 'throne_conquest') {
         lEndH = 22; lEndM = 40;
-      } else if (matchHour === 22) {
+      } else if (logStartHour === 22) {
         lEndH = 23; lEndM = 29;
-      } else if (matchHour === 19) {
+      } else if (logStartHour === 19) {
         lEndH = 20; lEndM = 59;
       }
       const eUtc = new Date(`${overrideDate}T${String(lEndH).padStart(2,'0')}:${String(lEndM).padStart(2,'0')}:00-03:00`);
       startDate = sUtc.toISOString();
       endDate = eUtc.toISOString();
       matchDate = overrideDate;
-      localStartDate = `${overrideDate}T${String(matchHour).padStart(2,'0')}:${String(eventMinute).padStart(2,'0')}`;
+      localStartDate = `${overrideDate}T${String(logStartHour).padStart(2,'0')}:${String(logStartMinute).padStart(2,'0')}`;
       localEndDate = `${overrideDate}T${String(lEndH).padStart(2,'0')}:${String(lEndM).padStart(2,'0')}`;
       console.log(`[Auto Process] OVERRIDE eventDate=${overrideDate} → ${localStartDate} to ${localEndDate} (UTC ${startDate} → ${endDate})`);
     } else if (hasCustomEnd && eventEndHour !== undefined && eventEndMinute !== undefined) {
-      // Mesmo dia da partida, fim customizado (ex.: Throne manual)
+      // Mesmo dia da partida, fim customizado (ex.: Throne manual / boss_kill)
       localEndDate = `${matchDate}T${String(eventEndHour).padStart(2,'0')}:${String(eventEndMinute).padStart(2,'0')}`;
       endDate = new Date(`${matchDate}T${String(eventEndHour).padStart(2,'0')}:${String(eventEndMinute).padStart(2,'0')}:00-03:00`).toISOString();
       console.log(`[Auto Process] Custom end window → ${localStartDate} to ${localEndDate}`);
     }
 
-    console.log(`[Auto Process] Fetching logs for ${matchDate} ${matchHour}:${String(eventMinute).padStart(2, '0')} (${eventType})`);
+    console.log(`[Auto Process] Fetching logs for ${matchDate} store=${matchHour}:${String(matchMinuteForStore).padStart(2, '0')} logs=${localStartDate}→${localEndDate} (${eventType})`);
+
+    // Resolve npc cedo (boss_kill) para não apagar partida de outro boss no mesmo minuto
+    const earlyBossNpcId =
+      typeof body.bossNpcId === 'number' && Number.isFinite(body.bossNpcId)
+        ? body.bossNpcId
+        : null;
 
     // Check if this match already exists - filter by event_type + minute to distinguish 22:00 vs 22:30
-    const { data: existingRows } = await internalClient
-      .from('pvp_matches')
-      .select('id')
-      .eq('match_date', matchDate)
-      .eq('match_hour', matchHour)
-      .eq('match_minute', eventMinute)
-      .eq('event_type', eventType)
-      .limit(1);
-    const existingMatch = existingRows && existingRows.length > 0 ? existingRows[0] : null;
+    // Schedule-free: se outro NPC já ocupou o slot, desloca o minuto gravado
+    for (let slotTry = 0; slotTry < 60; slotTry++) {
+      const { data: existingRows } = await internalClient
+        .from('pvp_matches')
+        .select('id, boss_npc_id')
+        .eq('match_date', matchDate)
+        .eq('match_hour', matchHour)
+        .eq('match_minute', matchMinuteForStore)
+        .eq('event_type', eventType)
+        .limit(1);
+      const existingMatch = existingRows && existingRows.length > 0 ? existingRows[0] : null;
 
-    if (existingMatch) {
-      if (forceReprocess) {
+      if (!existingMatch) break;
+
+      const sameNpc =
+        earlyBossNpcId == null ||
+        existingMatch.boss_npc_id == null ||
+        existingMatch.boss_npc_id === earlyBossNpcId;
+
+      if (forceReprocess && sameNpc) {
         console.log(`[Auto Process] forceReprocess=true: deleting existing match ${existingMatch.id} and related data`);
         await internalClient.from('pvp_kill_logs').delete().eq('match_id', existingMatch.id);
         await internalClient.from('pvp_match_players').delete().eq('match_id', existingMatch.id);
         await internalClient.from('player_badges').delete().eq('match_id', existingMatch.id);
         await internalClient.from('pvp_matches').delete().eq('id', existingMatch.id);
-      } else {
-        console.log(`[Auto Process] ${eventType} match already exists for ${matchDate} ${matchHour}:00, skipping`);
+        break;
+      }
+
+      if (!forceReprocess && sameNpc) {
+        console.log(`[Auto Process] ${eventType} match already exists for ${matchDate} ${matchHour}:${String(matchMinuteForStore).padStart(2, '0')}, skipping`);
         return {
           success: true,
           status: 'already_exists',
@@ -719,6 +752,13 @@ Deno.serve(async (req) => {
           eventType,
         };
       }
+
+      // Outro boss no mesmo minuto → desloca identidade da partida
+      matchMinuteForStore = (matchMinuteForStore + 1) % 60;
+      if (matchMinuteForStore === 0) matchHour = (matchHour + 1) % 24;
+      console.log(
+        `[Auto Process] Slot ocupado por npc=${existingMatch.boss_npc_id}; novo slot ${matchHour}:${String(matchMinuteForStore).padStart(2, '0')}`,
+      );
     }
 
     // Connect to external Supabase
@@ -832,7 +872,7 @@ Deno.serve(async (req) => {
       const resolved = await resolveBossKiller(internalClient, {
         matchDate,
         matchHour,
-        matchMinute: eventMinute,
+        matchMinute: matchMinuteForStore,
         bodyKiller: bossKiller,
         bodyNpcId: bossNpcId,
       });
@@ -848,7 +888,7 @@ Deno.serve(async (req) => {
       .insert({
         match_date: matchDate,
         match_hour: matchHour,
-        match_minute: eventMinute,
+        match_minute: matchMinuteForStore,
         boss_label: bossLabel,
         event_type: eventType,
         boss_killer: bossKiller,
@@ -1067,7 +1107,7 @@ Deno.serve(async (req) => {
     } else if (webhookUrl) {
       const [year, month, day] = matchDate.split('-');
       const formattedDate = `${day}/${month}/${year}`;
-      const formattedHour = `${String(matchHour).padStart(2, '0')}:${String(eventMinute).padStart(2, '0')}`;
+      const formattedHour = `${String(matchHour).padStart(2, '0')}:${String(matchMinuteForStore).padStart(2, '0')}`;
 
       const isThrone = eventType === 'throne_conquest';
       const rankingTitle = isThrone ? '🏆 Ranking Throne Conquest' : '🏆 Ranking BOSS Diário';
