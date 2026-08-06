@@ -34,11 +34,10 @@ interface ExpectedEvent {
   eventType: 'boss_event' | 'throne_conquest';
 }
 
-type BossHourOption = '19:00' | '22:00' | '22:30';
+type BossHourOption = '20:00' | '22:00';
 
 function parseBossHour(value: BossHourOption): { hour: number; minute: number } {
-  if (value === '19:00') return { hour: 19, minute: 0 };
-  if (value === '22:30') return { hour: 22, minute: 30 };
+  if (value === '20:00') return { hour: 20, minute: 0 };
   return { hour: 22, minute: 0 };
 }
 
@@ -52,9 +51,8 @@ export const AutoProcessMonitor = () => {
   const [manualEventType, setManualEventType] = useState<'boss_event' | 'throne_conquest' | 'world_boss'>('boss_event');
   const [manualDate, setManualDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [manualBossHour, setManualBossHour] = useState<BossHourOption>(() => {
-    const dow = new Date().getDay();
-    if (dow === 2 || dow === 4) return '22:30';
-    return dow === 1 ? '22:00' : '19:00';
+    const hour = new Date().getHours();
+    return hour >= 22 ? '22:00' : '20:00';
   });
   const [manualThroneEndHour, setManualThroneEndHour] = useState(22);
   const [manualThroneEndMinute, setManualThroneEndMinute] = useState(40);
@@ -191,9 +189,7 @@ export const AutoProcessMonitor = () => {
           title: selupanSkip ? 'Selupan diário ignorado' : 'Detector executado',
           description: selupanSkip
             ? 'Kill do Selupan sem World Boss PvP em Raklion — baseline atualizado, ranking não postado.'
-            : data?.mode === 'schedule_free'
-              ? 'Nenhum +1 nos NPCs 922/968/966 (baseline atualizado se necessário).'
-              : 'Nenhuma mudança detectada nos bosses PvP.',
+            : 'Nenhum +1 nos NPCs 922/968/966 (baseline atualizado se necessário).',
         });
       }
     } catch (error) {
@@ -430,7 +426,7 @@ export const AutoProcessMonitor = () => {
             <div>
               <CardTitle>Monitoramento de Processamento Automático</CardTitle>
               <CardDescription className="mt-1">
-                968/966: qualquer +1 posta. 922 (Selupan): só posta se for World Boss PvP em Raklion; kill diário normal só atualiza baseline.
+                968/966: +1 posta com logs a partir de 20:00 ou 22:00. 922 Selupan: só World Boss PvP em Raklion.
               </CardDescription>
             </div>
           </div>
@@ -441,7 +437,7 @@ export const AutoProcessMonitor = () => {
               onClick={handleRunBossDetector}
               disabled={detectingBoss}
               className="gap-2"
-              title="968/966: +1 posta. 922 Selupan: só World Boss PvP (PvP em Raklion)"
+              title="968/966: post com janela 20h/22h. 922 Selupan: só World Boss PvP"
             >
               {detectingBoss ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
               {detectingBoss ? 'Detectando...' : 'Rodar detector'}
@@ -511,9 +507,8 @@ export const AutoProcessMonitor = () => {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="19:00">19:00</SelectItem>
+                    <SelectItem value="20:00">20:00</SelectItem>
                     <SelectItem value="22:00">22:00</SelectItem>
-                    <SelectItem value="22:30">22:30</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
