@@ -34,10 +34,12 @@ interface ExpectedEvent {
   eventType: 'boss_event' | 'throne_conquest';
 }
 
-type BossHourOption = '20:00' | '22:00';
+type BossHourOption = '19:00' | '20:00' | '22:00' | '22:30';
 
 function parseBossHour(value: BossHourOption): { hour: number; minute: number } {
+  if (value === '19:00') return { hour: 19, minute: 0 };
   if (value === '20:00') return { hour: 20, minute: 0 };
+  if (value === '22:30') return { hour: 22, minute: 30 };
   return { hour: 22, minute: 0 };
 }
 
@@ -52,7 +54,9 @@ export const AutoProcessMonitor = () => {
   const [manualDate, setManualDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [manualBossHour, setManualBossHour] = useState<BossHourOption>(() => {
     const hour = new Date().getHours();
-    return hour >= 22 ? '22:00' : '20:00';
+    if (hour >= 22) return '22:00';
+    if (hour >= 20) return '20:00';
+    return '19:00';
   });
   const [manualThroneEndHour, setManualThroneEndHour] = useState(22);
   const [manualThroneEndMinute, setManualThroneEndMinute] = useState(40);
@@ -426,7 +430,7 @@ export const AutoProcessMonitor = () => {
             <div>
               <CardTitle>Monitoramento de Processamento Automático</CardTitle>
               <CardDescription className="mt-1">
-                968/966: +1 posta com logs a partir de 20:00 ou 22:00. 922 Selupan: só World Boss PvP em Raklion.
+                968/966: +1 posta; início da sessão por gap de idle no PvP Square (19h/20h/22h…). 922 Selupan: só World Boss PvP.
               </CardDescription>
             </div>
           </div>
@@ -437,7 +441,7 @@ export const AutoProcessMonitor = () => {
               onClick={handleRunBossDetector}
               disabled={detectingBoss}
               className="gap-2"
-              title="968/966: post com janela 20h/22h. 922 Selupan: só World Boss PvP"
+              title="968/966: sessão por atividade PvP Square. 922 Selupan: só World Boss PvP"
             >
               {detectingBoss ? <Loader2 className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
               {detectingBoss ? 'Detectando...' : 'Rodar detector'}
@@ -507,8 +511,10 @@ export const AutoProcessMonitor = () => {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="19:00">19:00</SelectItem>
                     <SelectItem value="20:00">20:00</SelectItem>
                     <SelectItem value="22:00">22:00</SelectItem>
+                    <SelectItem value="22:30">22:30</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

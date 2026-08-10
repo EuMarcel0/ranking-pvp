@@ -4,6 +4,21 @@ import { syncCharactersFromVortex } from '../_shared/vortexSync.ts';
 /** Minutos sem kill no mapa do evento (logs_pvp) para considerar o PvP encerrado */
 const EVENT_IDLE_MINUTES = 5;
 
+/**
+ * Gap sem kill em PvP Square que separa um evento do anterior.
+ * Ex.: boss 19h até ~20:03 = uma sessão; idle longo antes do 22h = nova sessão.
+ */
+const SQUARE_SESSION_GAP_MINUTES = 15;
+
+/** Slots usados para gravar a partida (rótulo Discord / identidade) */
+const SQUARE_MATCH_SLOTS = [
+  { hour: 19, minute: 0 },
+  { hour: 20, minute: 0 },
+  { hour: 21, minute: 0 },
+  { hour: 22, minute: 0 },
+  { hour: 22, minute: 30 },
+] as const;
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -200,6 +215,57 @@ function parseLogTimestampMs(log: ExternalLogEntry): number | null {
   const [, year, month, day, hour, minute, second] = match;
   // logs_pvp.timestamp guarda horário local BRT (sem timezone)
   return Date.UTC(+year, +month - 1, +day, +hour, +minute, +second) + 3 * 3600000;
+}
+
+/** Converte ms (UTC instant) → hora/minuto BRT */
+function msToBrtHourMinute(ms: number): { hour: number; minute: number } {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/Sao_Paulo',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(ms));
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
+  return { hour, minute };
+}
+
+/** Último slot 19/20/21/22/22:30 <= horário da sessão */
+function snapToSquareMatchSlot(hour: number, minute: number): { hour: number; minute: number } {
+  const mins = hour * 60 + minute;
+  let best = SQUARE_MATCH_SLOTS[0];
+  for (const slot of SQUARE_MATCH_SLOTS) {
+    if (slot.hour * 60 + slot.minute <= mins) best = slot;
+  }
+  return { hour: best.hour, minute: best.minute };
+}
+
+/**
+ * Início da sessão atual de PvP Square: do kill mais recente, anda para trás
+ * até achar gap > SQUARE_SESSION_GAP_MINUTES (ou o primeiro kill).
+ */
+function findCurrentSquareSessionStartMs(logs: ExternalLogEntry[]): number | null {
+  const times: number[] = [];
+  for (const log of logs) {
+    if (!log.content || !isPvPSquareBossEventLog(log.content)) continue;
+    const ts = parseLogTimestampMs(log);
+    if (ts != null) times.push(ts);
+  }
+  if (times.length === 0) return null;
+
+  times.sort((a, b) => a - b);
+  const gapMs = SQUARE_SESSION_GAP_MINUTES * 60_000;
+  let sessionStart = times[times.length - 1];
+
+  for (let i = times.length - 1; i > 0; i--) {
+    if (times[i] - times[i - 1] > gapMs) {
+      sessionStart = times[i];
+      break;
+    }
+    sessionStart = times[i - 1];
+  }
+
+  return sessionStart;
 }
 
 // Format ranking as monospaced table for Discord
@@ -755,53 +821,65 @@ Deno.serve(async (req) => {
         ? body.bossNpcId
         : null;
 
-    // Check if this match already exists - filter by event_type + minute to distinguish 22:00 vs 22:30
-    // Schedule-free: se outro NPC já ocupou o slot, desloca o minuto gravado
-    for (let slotTry = 0; slotTry < 60; slotTry++) {
-      const { data: existingRows } = await internalClient
-        .from('pvp_matches')
-        .select('id, boss_npc_id')
-        .eq('match_date', matchDate)
-        .eq('match_hour', matchHour)
-        .eq('match_minute', matchMinuteForStore)
-        .eq('event_type', eventType)
-        .limit(1);
-      const existingMatch = existingRows && existingRows.length > 0 ? existingRows[0] : null;
+    const isWorldBossEventEarly =
+      eventType === 'world_boss' || earlyBossNpcId === WORLD_BOSS_NPC_ID;
 
-      if (!existingMatch) break;
+    /** boss_kill Square: identidade da partida só após detectar sessão de atividade */
+    const deferMatchIdentity =
+      body.trigger === 'boss_kill' && eventType === 'boss_event' && !isWorldBossEventEarly;
 
-      const sameNpc =
-        earlyBossNpcId == null ||
-        existingMatch.boss_npc_id == null ||
-        existingMatch.boss_npc_id === earlyBossNpcId;
+    async function resolveExistingMatchSlot(): Promise<Record<string, unknown> | null> {
+      for (let slotTry = 0; slotTry < 60; slotTry++) {
+        const { data: existingRows } = await internalClient
+          .from('pvp_matches')
+          .select('id, boss_npc_id')
+          .eq('match_date', matchDate)
+          .eq('match_hour', matchHour)
+          .eq('match_minute', matchMinuteForStore)
+          .eq('event_type', eventType)
+          .limit(1);
+        const existingMatch = existingRows && existingRows.length > 0 ? existingRows[0] : null;
 
-      if (forceReprocess && sameNpc) {
-        console.log(`[Auto Process] forceReprocess=true: deleting existing match ${existingMatch.id} and related data`);
-        await internalClient.from('pvp_kill_logs').delete().eq('match_id', existingMatch.id);
-        await internalClient.from('pvp_match_players').delete().eq('match_id', existingMatch.id);
-        await internalClient.from('player_badges').delete().eq('match_id', existingMatch.id);
-        await internalClient.from('pvp_matches').delete().eq('id', existingMatch.id);
-        break;
+        if (!existingMatch) return null;
+
+        const sameNpc =
+          earlyBossNpcId == null ||
+          existingMatch.boss_npc_id == null ||
+          existingMatch.boss_npc_id === earlyBossNpcId;
+
+        if (forceReprocess && sameNpc) {
+          console.log(`[Auto Process] forceReprocess=true: deleting existing match ${existingMatch.id} and related data`);
+          await internalClient.from('pvp_kill_logs').delete().eq('match_id', existingMatch.id);
+          await internalClient.from('pvp_match_players').delete().eq('match_id', existingMatch.id);
+          await internalClient.from('player_badges').delete().eq('match_id', existingMatch.id);
+          await internalClient.from('pvp_matches').delete().eq('id', existingMatch.id);
+          return null;
+        }
+
+        if (!forceReprocess && sameNpc) {
+          console.log(`[Auto Process] ${eventType} match already exists for ${matchDate} ${matchHour}:${String(matchMinuteForStore).padStart(2, '0')}, skipping`);
+          return {
+            success: true,
+            status: 'already_exists',
+            message: 'Match already processed',
+            matchDate,
+            matchHour,
+            eventType,
+          };
+        }
+
+        matchMinuteForStore = (matchMinuteForStore + 1) % 60;
+        if (matchMinuteForStore === 0) matchHour = (matchHour + 1) % 24;
+        console.log(
+          `[Auto Process] Slot ocupado por npc=${existingMatch.boss_npc_id}; novo slot ${matchHour}:${String(matchMinuteForStore).padStart(2, '0')}`,
+        );
       }
+      return null;
+    }
 
-      if (!forceReprocess && sameNpc) {
-        console.log(`[Auto Process] ${eventType} match already exists for ${matchDate} ${matchHour}:${String(matchMinuteForStore).padStart(2, '0')}, skipping`);
-        return {
-          success: true,
-          status: 'already_exists',
-          message: 'Match already processed',
-          matchDate,
-          matchHour,
-          eventType,
-        };
-      }
-
-      // Outro boss no mesmo minuto → desloca identidade da partida
-      matchMinuteForStore = (matchMinuteForStore + 1) % 60;
-      if (matchMinuteForStore === 0) matchHour = (matchHour + 1) % 24;
-      console.log(
-        `[Auto Process] Slot ocupado por npc=${existingMatch.boss_npc_id}; novo slot ${matchHour}:${String(matchMinuteForStore).padStart(2, '0')}`,
-      );
+    if (!deferMatchIdentity) {
+      const earlyExisting = await resolveExistingMatchSlot();
+      if (earlyExisting) return earlyExisting;
     }
 
     // Connect to external Supabase
@@ -865,6 +943,32 @@ Deno.serve(async (req) => {
     if (!logs || logs.length === 0) {
       console.log('[Auto Process] No logs found for this time period');
       return { success: true, status: 'no_logs', message: 'No logs found', matchDate, matchHour, attempt, eventType };
+    }
+
+    // boss_kill Square: corta o lookback na sessão atual (gap de idle) e ancora 19/20/21/22h
+    if (deferMatchIdentity) {
+      const sessionStartMs = findCurrentSquareSessionStartMs(logs);
+      if (sessionStartMs != null) {
+        const before = logs.length;
+        logs = logs.filter((log) => {
+          const ts = parseLogTimestampMs(log);
+          return ts != null && ts >= sessionStartMs;
+        });
+        const brtParts = msToBrtHourMinute(sessionStartMs);
+        const slot = snapToSquareMatchSlot(brtParts.hour, brtParts.minute);
+        matchHour = slot.hour;
+        matchMinuteForStore = slot.minute;
+        console.log(
+          `[Auto Process] Square session start BRT ~${String(brtParts.hour).padStart(2, '0')}:${String(brtParts.minute).padStart(2, '0')} ` +
+            `→ store ${matchHour}:${String(matchMinuteForStore).padStart(2, '0')} ` +
+            `(logs ${before}→${logs.length}, gap=${SQUARE_SESSION_GAP_MINUTES}min)`,
+        );
+      } else {
+        console.warn('[Auto Process] No PvP Square kills in lookback to detect session; using request window');
+      }
+
+      const deferredExisting = await resolveExistingMatchSlot();
+      if (deferredExisting) return deferredExisting;
     }
 
     // Check if we should postpone based on inactivity since last kill

@@ -1,7 +1,8 @@
 /**
  * Detecta morte dos bosses PvP via ranking monster_kill do VortexMU
  * (NPC 968/966 Square + 922 Selupan).
- * Square: qualquer +1 dispara post; janela de logs ancorada em 20:00 ou 22:00.
+ * Square: qualquer +1 dispara post; lookback amplo + sessão por gap de idle
+ * (auto-process corta no início real do PvP — 19h/20h/22h etc.).
  * Selupan: também é boss diário PvE — só posta se houver World Boss PvP
  * (volume mínimo de kills em Raklion); senão só atualiza baseline.
  */
@@ -21,16 +22,15 @@ const BOSS_NPC_NAMES: Record<number, string> = {
 const WORLD_BOSS_NPC_ID = 922;
 const VORTEX_URL = 'https://vortexmu.net/rankings/monster_kill/load_ranking_data';
 
-/** Horários fixos do Boss Event PvP Square (BRT) */
-const SQUARE_BOSS_WINDOWS = [
-  { hour: 20, minute: 0 },
-  { hour: 22, minute: 0 },
-] as const;
-
-/** Lookback só para Selupan (sem janela fixa de Square). */
+/** Lookback amplo: auto-process detecta o início da sessão por gap de idle */
+const SQUARE_LOOKBACK_MINUTES = 210;
 const WORLD_BOSS_LOOKBACK_MINUTES = 240;
 /** Evita reprocessar o mesmo npc se o poll oscilar no mesmo minuto */
 const DEDUPE_MINUTES = 3;
+
+function lookbackMinutesForNpc(npcId: number): number {
+  return npcId === WORLD_BOSS_NPC_ID ? WORLD_BOSS_LOOKBACK_MINUTES : SQUARE_LOOKBACK_MINUTES;
+}
 
 function bossNpcLabel(npcId: number): string {
   return BOSS_NPC_NAMES[npcId] ?? `NPC ${npcId}`;
@@ -180,16 +180,6 @@ function isSquareBossNpc(npcId: number): boolean {
   return npcId !== WORLD_BOSS_NPC_ID;
 }
 
-/**
- * Resolve janela 20h/22h para logs + identidade da partida (Square).
- * Relógio BRT: >= 22:00 → 22h; >= 20:00 → 20h.
- */
-function resolveSquareBossWindow(brt: Date): { hour: number; minute: number } {
-  const nowMins = brt.getHours() * 60 + brt.getMinutes();
-  if (nowMins >= 22 * 60) return { hour: 22, minute: 0 };
-  return { hour: 20, minute: 0 };
-}
-
 async function recentlyPostedForNpc(
   client: SupabaseClient,
   npcId: number,
@@ -217,39 +207,43 @@ async function postPendingTrigger(
   const endHour = brt.getHours();
   const endMinute = brt.getMinutes();
 
-  let eventHour: number;
-  let eventMinute: number;
-  let matchHour: number;
-  let matchMinute: number;
-
-  if (isSquareBossNpc(pending.npc_id)) {
-    // Square: logs e partida sempre a partir de 20:00 ou 22:00
-    const window = resolveSquareBossWindow(brt);
-    eventHour = window.hour;
-    eventMinute = window.minute;
-    matchHour = window.hour;
-    matchMinute = window.minute;
-  } else {
-    // Selupan: lookback a partir de agora
-    const start = addMinutes(brt, -WORLD_BOSS_LOOKBACK_MINUTES);
-    const startSameDay =
-      ymd(start) === pending.match_date
-        ? start
-        : new Date(brt.getFullYear(), brt.getMonth(), brt.getDate(), 0, 0, 0, 0);
-    eventHour = startSameDay.getHours();
-    eventMinute = startSameDay.getMinutes();
-    matchHour = pending.match_hour;
-    matchMinute = pending.match_minute;
-  }
+  // Lookback amplo; Square: auto-process corta na sessão atual (gap idle) e ancora 19/20/22h
+  const start = addMinutes(brt, -lookbackMinutesForNpc(pending.npc_id));
+  const startSameDay =
+    ymd(start) === pending.match_date
+      ? start
+      : new Date(brt.getFullYear(), brt.getMonth(), brt.getDate(), 0, 0, 0, 0);
+  const eventHour = startSameDay.getHours();
+  const eventMinute = startSameDay.getMinutes();
 
   console.log(
     `[DetectBossKill] Posting: ${pending.killer_name} ` +
       `${bossNpcLabel(pending.npc_id)} detected=${pending.match_date} ` +
       `${pending.match_hour}:${String(pending.match_minute).padStart(2, '0')} ` +
-      `logs=${String(eventHour).padStart(2, '0')}:${String(eventMinute).padStart(2, '0')}→` +
-      `${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(2, '0')} ` +
-      `store=${matchHour}:${String(matchMinute).padStart(2, '0')}`,
+      `lookback=${String(eventHour).padStart(2, '0')}:${String(eventMinute).padStart(2, '0')}→` +
+      `${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(2, '0')}`,
   );
+
+  const processBody: Record<string, unknown> = {
+    trigger: 'boss_kill',
+    attempt: 3,
+    forceProcess: true,
+    forceReprocess: true,
+    eventHour,
+    eventMinute,
+    eventEndHour: endHour,
+    eventEndMinute: endMinute,
+    eventType: eventTypeForNpc(pending.npc_id),
+    eventDate: pending.match_date,
+    bossKiller: pending.killer_name,
+    bossNpcId: pending.npc_id,
+  };
+
+  // Selupan: identidade = horário da detecção. Square: auto-process define pelo início da sessão.
+  if (!isSquareBossNpc(pending.npc_id)) {
+    processBody.matchHourOverride = pending.match_hour;
+    processBody.matchMinuteOverride = pending.match_minute;
+  }
 
   const processRes = await fetch(`${supabaseUrl}/functions/v1/auto-process-ranking`, {
     method: 'POST',
@@ -257,22 +251,7 @@ async function postPendingTrigger(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${serviceKey}`,
     },
-    body: JSON.stringify({
-      trigger: 'boss_kill',
-      attempt: 3,
-      forceProcess: true,
-      forceReprocess: true,
-      eventHour,
-      eventMinute,
-      eventEndHour: endHour,
-      eventEndMinute: endMinute,
-      eventType: eventTypeForNpc(pending.npc_id),
-      eventDate: pending.match_date,
-      matchHourOverride: matchHour,
-      matchMinuteOverride: matchMinute,
-      bossKiller: pending.killer_name,
-      bossNpcId: pending.npc_id,
-    }),
+    body: JSON.stringify(processBody),
   });
 
   const processJson = await processRes.json().catch(() => ({}));
@@ -403,35 +382,16 @@ Deno.serve(async (req) => {
 
       const eventType = eventTypeForNpc(npcId);
 
-      // Square: identidade = janela 20h/22h. Selupan: minuto da detecção.
-      const window = isSquareBossNpc(npcId)
-        ? resolveSquareBossWindow(brt)
-        : { hour: brt.getHours(), minute: brt.getMinutes() };
-
-      // Já postou essa janela (Square) hoje? Evita reprocessar o mesmo slot
-      if (isSquareBossNpc(npcId)) {
-        const { data: windowMatch } = await client
-          .from('pvp_matches')
-          .select('id')
-          .eq('match_date', today)
-          .eq('match_hour', window.hour)
-          .eq('match_minute', window.minute)
-          .eq('event_type', 'boss_event')
-          .limit(1);
-        if (windowMatch && windowMatch.length > 0) {
-          await saveBaseline(client, npcId, current);
-          npcResult.skipped = `window_already_posted_${window.hour}h`;
-          npcResults.push(npcResult);
-          continue;
-        }
-      }
+      // Lock por minuto da detecção (a partida Square é ancorada depois pela sessão de logs)
+      const detectHour = brt.getHours();
+      const detectMinute = brt.getMinutes();
 
       const { data: existingTrigger } = await client
         .from('boss_kill_triggers')
         .select('id, posted_at')
         .eq('match_date', today)
-        .eq('match_hour', window.hour)
-        .eq('match_minute', window.minute)
+        .eq('match_hour', detectHour)
+        .eq('match_minute', detectMinute)
         .eq('event_type', eventType)
         .eq('npc_id', npcId)
         .maybeSingle();
@@ -448,8 +408,8 @@ Deno.serve(async (req) => {
         .from('boss_kill_triggers')
         .insert({
           match_date: today,
-          match_hour: window.hour,
-          match_minute: window.minute,
+          match_hour: detectHour,
+          match_minute: detectMinute,
           event_type: eventType,
           npc_id: npcId,
           killer_name: killer.name,
@@ -469,7 +429,7 @@ Deno.serve(async (req) => {
       console.log(
         `[DetectBossKill] Boss kill detected: ${killer.name} ` +
           `boss=${bossNpcLabel(npcId)} (${npcId}) ` +
-          `window=${today} ${window.hour}:${String(window.minute).padStart(2, '0')} ` +
+          `at=${today} ${detectHour}:${String(detectMinute).padStart(2, '0')} ` +
           `(${killer.prev}->${killer.next}, delta=${killer.delta})`,
       );
 
@@ -480,8 +440,8 @@ Deno.serve(async (req) => {
         {
           id: lockRow.id,
           match_date: today,
-          match_hour: window.hour,
-          match_minute: window.minute,
+          match_hour: detectHour,
+          match_minute: detectMinute,
           npc_id: npcId,
           killer_name: killer.name,
         },
@@ -508,9 +468,9 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({
         success: true,
-        mode: 'square_windows_20_22',
+        mode: 'session_gap',
         brt: brt.toISOString(),
-        squareWindows: SQUARE_BOSS_WINDOWS,
+        squareLookbackMinutes: SQUARE_LOOKBACK_MINUTES,
         worldBossLookbackMinutes: WORLD_BOSS_LOOKBACK_MINUTES,
         npcs: npcResults,
         triggered: triggeredList[0] ?? null,
