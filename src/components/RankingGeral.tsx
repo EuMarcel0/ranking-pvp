@@ -12,12 +12,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Label } from '@/components/ui/label';
-import { format } from 'date-fns';
+import { format, startOfDay } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/useAuth';
+
+function todayStart(): Date {
+  return startOfDay(new Date());
+}
 
 interface AggregatedPlayer {
   name: string;
@@ -40,15 +44,17 @@ export const RankingGeral = () => {
   const [searchParams] = useSearchParams();
   const [sortBy, setSortBy] = useState<SortKey>('eventScore');
   const [dateFrom, setDateFrom] = useState<Date>();
-  const [dateTo, setDateTo] = useState<Date>();
+  const [dateTo, setDateTo] = useState<Date>(() => todayStart());
   const [hourFrom, setHourFrom] = useState<number>();
   const [hourTo, setHourTo] = useState<number>();
   const [debouncedDateFrom, setDebouncedDateFrom] = useState<Date>();
-  const [debouncedDateTo, setDebouncedDateTo] = useState<Date>();
+  const [debouncedDateTo, setDebouncedDateTo] = useState<Date>(() => todayStart());
   const [debouncedHourFrom, setDebouncedHourFrom] = useState<number>();
   const [debouncedHourTo, setDebouncedHourTo] = useState<number>();
   const [classFilter, setClassFilter] = useState<string>('all');
   const [guildFilter, setGuildFilter] = useState<string>('all');
+  const [dateFromOpen, setDateFromOpen] = useState(false);
+  const [dateToOpen, setDateToOpen] = useState(false);
   const [showDiscordModal, setShowDiscordModal] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [environment, setEnvironment] = useState<'homolog' | 'prod'>('homolog');
@@ -542,7 +548,7 @@ export const RankingGeral = () => {
 
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold text-muted-foreground">De:</span>
-            <Popover>
+            <Popover open={dateFromOpen} onOpenChange={setDateFromOpen}>
               <PopoverTrigger asChild>
                 <Button
                   variant="outline"
@@ -558,8 +564,13 @@ export const RankingGeral = () => {
               <PopoverContent className="w-auto p-0" align="start">
                 <Calendar
                   mode="single"
+                  numberOfMonths={1}
                   selected={dateFrom}
-                  onSelect={setDateFrom}
+                  onSelect={(date) => {
+                    if (!date) return;
+                    setDateFrom(startOfDay(date));
+                    setDateFromOpen(false);
+                  }}
                   initialFocus
                   className={cn("p-3 pointer-events-auto")}
                 />
@@ -569,7 +580,7 @@ export const RankingGeral = () => {
 
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold text-muted-foreground">Até:</span>
-            <Popover>
+            <Popover open={dateToOpen} onOpenChange={setDateToOpen}>
               <PopoverTrigger asChild>
                 <Button
                   variant="outline"
@@ -585,8 +596,13 @@ export const RankingGeral = () => {
               <PopoverContent className="w-auto p-0" align="start">
                 <Calendar
                   mode="single"
+                  numberOfMonths={1}
                   selected={dateTo}
-                  onSelect={setDateTo}
+                  onSelect={(date) => {
+                    if (!date) return;
+                    setDateTo(startOfDay(date));
+                    setDateToOpen(false);
+                  }}
                   initialFocus
                   className={cn("p-3 pointer-events-auto")}
                 />
@@ -628,7 +644,7 @@ export const RankingGeral = () => {
             variant="ghost"
             onClick={() => {
               setDateFrom(undefined);
-              setDateTo(undefined);
+              setDateTo(todayStart());
               setHourFrom(undefined);
               setHourTo(undefined);
               setClassFilter('all');
