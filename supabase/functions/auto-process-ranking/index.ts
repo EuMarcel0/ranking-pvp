@@ -86,7 +86,7 @@ const BOSS_NPC_NAMES: Record<number, string> = {
 
 /**
  * Selupan (922) também é boss diário PvE. Só consideramos World Boss PvP
- * quando há volume mínimo de kills PvP em Raklion no lookback.
+ * quando há volume mínimo de kills no mapa do evento (Platinum Square / Raklion).
  * Manual sync (trigger !== boss_kill) ignora esse limiar.
  */
 const WORLD_BOSS_MIN_PVP_KILLS = 15;
@@ -398,12 +398,17 @@ function isPvPSquareBossEventLog(content: string): boolean {
 }
 
 /**
- * Selupan World Boss PvP: kills PvP em Raklion (qualquer server tag).
- * Square/Devias ficam de fora. O limiar de volume separa evento de PK/PvE fraco.
+ * Selupan World Boss PvP (VIP Platinum):
+ * logs em PvP Square - [Server: Platinum PvP].
+ * Raklion permanece como fallback (eventos open-world antigos).
  */
 function isWorldBossEventLog(content: string): boolean {
+  const platinumSquare =
+    /\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server:\s*Platinum PvP\]\*{0,2}/i.test(content);
+  if (platinumSquare) return true;
+
   if (!/Raklion/i.test(content)) return false;
-  if (isDeviasBossEventLog(content) || isPvPSquareBossEventLog(content)) return false;
+  if (isDeviasBossEventLog(content)) return false;
   return /:dagger:/.test(content) && /matou/i.test(content);
 }
 
@@ -472,7 +477,7 @@ function parseExternalDbContentBoss(logs: ExternalLogEntry[]): ParseResult {
   );
 }
 
-// Parser logic for Selupan World Boss PvP (NPC 922) — Raklion
+// Parser logic for Selupan World Boss PvP (NPC 922) — Platinum Square / Raklion
 function parseExternalDbContentWorldBoss(logs: ExternalLogEntry[]): ParseResult {
   return accumulateKillStats(
     logs,
@@ -1020,7 +1025,7 @@ Deno.serve(async (req) => {
           success: true,
           status: 'skipped_normal_selupan',
           message:
-            'Kill de Selupan sem volume de PvP em Raklion (boss diário normal). Ranking não postado.',
+            'Kill de Selupan sem volume de PvP no World Boss (Platinum Square/Raklion). Ranking não postado.',
           matchDate,
           matchHour,
           eventType,

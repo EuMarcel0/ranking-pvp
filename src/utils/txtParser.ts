@@ -81,7 +81,8 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
                         mapPatternDeviasNoAsterisks.test(content);
 
     const isWorldBossMap =
-      /Raklion/i.test(content) && !isDeviasMap && !isPvPSquareMap;
+      (/PvP Square/i.test(content) && /\[Server:\s*Platinum PvP\]/i.test(content)) ||
+      (/Raklion/i.test(content) && !isDeviasMap && !isPvPSquareMap);
     
     // If target event type is specified, filter by it
     if (targetEventType === 'boss_event' && !isPvPSquareMap) continue;
@@ -189,7 +190,9 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
   const singleLinePattern = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*-\s*:dagger:\s*\*{0,2}(\w+)\*{0,2}\s+matou\s+:skull:\s*\*{0,2}(\w+)\*{0,2}\s+no mapa\s+:map:\s*(.+)$/i;
   const validMapPvPSquare = /^\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server: (?:Boss Event PvP|Platinum PvP)\]\*{0,2}$/i;
   const validMapDevias = /^\*{0,2}Devias\*{0,2}\s*-\s*\*{0,2}\[Server: Boss Event PvP\]\*{0,2}$/i;
-  const validMapWorldBoss = /^\*{0,2}.*Raklion.*$/i;
+  const validMapWorldBoss =
+    /^\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server: Platinum PvP\]\*{0,2}$/i;
+  const validMapWorldBossRaklion = /^\*{0,2}.*Raklion.*$/i;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -208,7 +211,8 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
       // Check which map type this is
       const isPvPSquare = validMapPvPSquare.test(mapPart);
       const isDevias = validMapDevias.test(mapPart);
-      const isWorldBoss = !isDevias && validMapWorldBoss.test(mapPart);
+      const isWorldBoss =
+        !isDevias && (validMapWorldBoss.test(mapPart) || validMapWorldBossRaklion.test(mapPart));
       
       // If target event type is specified, filter by it
       if (targetEventType === 'boss_event' && !isPvPSquare) {
