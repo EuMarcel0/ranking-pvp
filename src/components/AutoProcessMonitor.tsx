@@ -285,7 +285,23 @@ export const AutoProcessMonitor = () => {
 
       const { data, error } = await supabase.functions.invoke('auto-process-ranking', { body });
 
-      if (error) throw error;
+      if (error) {
+        let details = error.message;
+        try {
+          const ctx = error as { context?: Response };
+          if (ctx.context) {
+            const errBody = await ctx.context.json();
+            details =
+              errBody?.details ||
+              errBody?.error ||
+              errBody?.message ||
+              details;
+          }
+        } catch {
+          /* ignore parse errors */
+        }
+        throw new Error(details);
+      }
 
       if (data?.success && data?.status !== 'already_exists' && data?.status !== 'no_logs' && data?.status !== 'postponed') {
         const endLabel = `${String(end.hour).padStart(2, '0')}:${String(end.minute).padStart(2, '0')}`;

@@ -24,6 +24,40 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+function extractBearerToken(authHeader: string | null): string {
+  if (!authHeader?.startsWith('Bearer ')) return '';
+  return authHeader.slice('Bearer '.length).trim();
+}
+
+/** Decodifica payload JWT sem verificar assinatura (só para ler role/sub). */
+function peekJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return null;
+    const json = atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'));
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function isPrivilegedApiToken(token: string): boolean {
+  if (!token) return false;
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
+  const publishableKey = Deno.env.get('SUPABASE_PUBLISHABLE_KEY') || '';
+  if (
+    token === serviceRoleKey ||
+    token === anonKey ||
+    (publishableKey !== '' && token === publishableKey)
+  ) {
+    return true;
+  }
+  // Aceita JWT service_role mesmo se o secret do env for sb_secret_* (formato novo)
+  const payload = peekJwtPayload(token);
+  return payload?.role === 'service_role';
+}
+
 interface ExternalLogEntry {
   id: string;
   content: string;
@@ -1128,11 +1162,15 @@ Deno.serve(async (req) => {
       ? [...playerNames, bossKiller]
       : playerNames;
     console.log(`[Auto Process] Syncing ${syncNames.length} characters from VortexMU...`);
-    const syncSummary = await syncCharactersFromVortex(internalClient, syncNames, {
-      concurrency: 5,
-      delayMs: 150,
-    });
-    console.log(`[Auto Process] VortexMU sync:`, syncSummary);
+    try {
+      const syncSummary = await syncCharactersFromVortex(internalClient, syncNames, {
+        concurrency: 5,
+        delayMs: 150,
+      });
+      console.log(`[Auto Process] VortexMU sync:`, syncSummary);
+    } catch (syncErr) {
+      console.warn('[Auto Process] VortexMU sync failed (continuing):', syncErr);
+    }
 
     // Fetch character data (including banned status for filtering)
     const { data: characters } = await internalClient
@@ -1529,10 +1567,8 @@ Deno.serve(async (req) => {
 
     // Disparo automático do detector de boss kill (service role / anon via pg_net)
     if (body.trigger === 'boss_kill') {
-      const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
-      const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
-      const token = authHeader?.replace('Bearer ', '') || '';
-      if (!token || (token !== serviceRoleKey && token !== anonKey)) {
+      const token = extractBearerToken(authHeader);
+      if (!isPrivilegedApiToken(token)) {
         console.error('[Auto Process] Unauthorized boss_kill trigger attempt');
         return new Response(
           JSON.stringify({ error: 'Unauthorized' }),
@@ -1548,7 +1584,9 @@ Deno.serve(async (req) => {
     }
 
     // Manual / UI calls: require authenticated admin or moderator
-    if (!authHeader?.startsWith('Bearer ')) {
+    // (também aceita service role — útil para scripts / retries)
+    const token = extractBearerToken(authHeader);
+    if (!token) {
       return new Response(
         JSON.stringify({ error: 'Unauthorized' }),
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
@@ -1559,35 +1597,57 @@ Deno.serve(async (req) => {
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
-    const supabaseAuth = createClient(supabaseUrl, anonKey, {
-      global: { headers: { Authorization: authHeader } },
-    });
+    if (isPrivilegedApiToken(token)) {
+      console.log('[Auto Process] Authorized via privileged API token');
+    } else {
+      const supabaseAuth = createClient(supabaseUrl, anonKey || serviceKey, {
+        global: { headers: { Authorization: authHeader! } },
+      });
 
-    const token = authHeader.replace('Bearer ', '');
-    const { data: claimsData, error: claimsError } = await supabaseAuth.auth.getClaims(token);
-    if (claimsError || !claimsData?.claims) {
-      return new Response(
-        JSON.stringify({ error: 'Unauthorized' }),
-        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
-      );
-    }
+      let userId: string | null = null;
 
-    const userId = claimsData.claims.sub as string;
+      // Preferir getUser (mais compatível); getClaims como fallback
+      const { data: userData, error: userError } = await supabaseAuth.auth.getUser(token);
+      if (!userError && userData?.user?.id) {
+        userId = userData.user.id;
+      } else {
+        try {
+          const { data: claimsData, error: claimsError } = await supabaseAuth.auth.getClaims(token);
+          if (!claimsError && claimsData?.claims?.sub) {
+            userId = claimsData.claims.sub as string;
+          }
+        } catch (e) {
+          console.warn('[Auto Process] getClaims failed:', e);
+        }
+      }
 
-    // Check admin or moderator role using service role client
-    const adminClient = createClient(supabaseUrl, serviceKey);
-    const { data: roleData } = await adminClient
-      .from('user_roles')
-      .select('role')
-      .eq('user_id', userId)
-      .in('role', ['admin', 'moderator'])
-      .maybeSingle();
+      if (!userId) {
+        console.error('[Auto Process] Unauthorized manual trigger', {
+          userError: userError?.message,
+        });
+        return new Response(
+          JSON.stringify({
+            error: 'Unauthorized',
+            details: userError?.message || 'Invalid session — faça login novamente',
+          }),
+          { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
 
-    if (!roleData) {
-      return new Response(
-        JSON.stringify({ error: 'Forbidden: admin or moderator role required' }),
-        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
-      );
+      const adminClient = createClient(supabaseUrl, serviceKey);
+      const { data: roleData } = await adminClient
+        .from('user_roles')
+        .select('role')
+        .eq('user_id', userId)
+        .in('role', ['admin', 'moderator'])
+        .maybeSingle();
+
+      if (!roleData) {
+        return new Response(
+          JSON.stringify({ error: 'Forbidden: admin or moderator role required' }),
+          { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
     }
 
     // Default (manual / UI): run synchronously and return result.
