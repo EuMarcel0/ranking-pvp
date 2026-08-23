@@ -34,11 +34,12 @@ interface ExpectedEvent {
   eventType: 'boss_event' | 'throne_conquest';
 }
 
-type BossHourOption = '19:00' | '20:00' | '22:00' | '22:30';
+type BossHourOption = '19:00' | '20:00' | '21:00' | '22:00' | '22:30';
 
 function parseBossHour(value: BossHourOption): { hour: number; minute: number } {
   if (value === '19:00') return { hour: 19, minute: 0 };
   if (value === '20:00') return { hour: 20, minute: 0 };
+  if (value === '21:00') return { hour: 21, minute: 0 };
   if (value === '22:30') return { hour: 22, minute: 30 };
   return { hour: 22, minute: 0 };
 }
@@ -60,6 +61,8 @@ export const AutoProcessMonitor = () => {
   });
   const [manualThroneEndHour, setManualThroneEndHour] = useState(22);
   const [manualThroneEndMinute, setManualThroneEndMinute] = useState(40);
+  const [manualKillHour, setManualKillHour] = useState(() => new Date().getHours());
+  const [manualKillMinute, setManualKillMinute] = useState(() => new Date().getMinutes());
   const [manualBossKiller, setManualBossKiller] = useState('');
   const [manualBossNpcId, setManualBossNpcId] = useState<string>('');
   const [manualSyncing, setManualSyncing] = useState(false);
@@ -220,7 +223,9 @@ export const AutoProcessMonitor = () => {
       ? { hour: 21, minute: 36 }
       : parseBossHour(manualBossHour);
 
-    // Boss: fim = horário atual do clique (BRT). Throne: picker manual.
+    // Boss Square: fim = horário atual do clique (BRT).
+    // World Boss: fim = hora do kill informada.
+    // Throne: picker manual.
     const nowBrt = new Date(
       new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })
     );
@@ -229,9 +234,20 @@ export const AutoProcessMonitor = () => {
     let end: { hour: number; minute: number };
     if (isThrone) {
       end = { hour: manualThroneEndHour, minute: manualThroneEndMinute };
+    } else if (isWorldBoss) {
+      end = { hour: manualKillHour, minute: manualKillMinute };
+      const startMin = hour * 60 + minute;
+      const endMin = end.hour * 60 + end.minute;
+      if (endMin <= startMin) {
+        toast({
+          title: "Hora do kill inválida",
+          description: "A hora do kill precisa ser depois da hora início.",
+          variant: "destructive",
+        });
+        return;
+      }
     } else {
       end = { hour: nowBrt.getHours(), minute: nowBrt.getMinutes() };
-      // Se data passada e "agora" ainda é antes do início do evento nesse dia, usa fim do dia
       const startMin = hour * 60 + minute;
       const endMin = end.hour * 60 + end.minute;
       if (manualDate !== todayBrt && endMin <= startMin) {
@@ -259,6 +275,12 @@ export const AutoProcessMonitor = () => {
         if (killer) body.bossKiller = killer;
         if (manualBossNpcId) body.bossNpcId = Number(manualBossNpcId);
         else if (isWorldBoss) body.bossNpcId = 922;
+      }
+
+      // World Boss: identidade da partida = horário do kill
+      if (isWorldBoss) {
+        body.matchHourOverride = end.hour;
+        body.matchMinuteOverride = end.minute;
       }
 
       const { data, error } = await supabase.functions.invoke('auto-process-ranking', { body });
@@ -463,7 +485,7 @@ export const AutoProcessMonitor = () => {
             <p className="text-sm text-muted-foreground mt-1">
               Busca em <code className="text-xs">logs_pvp</code>, sincroniza classe/guild no VortexMU e posta no Discord
               com <strong>Boss Killer: nome - guild — boss</strong>. Se o evento já existir, reprocessa.
-              No PvP Square, a hora fim é o momento do clique.
+              No PvP Square, a hora fim é o momento do clique. No World Boss, informe a <strong>hora do kill</strong>.
             </p>
           </div>
 
@@ -475,8 +497,12 @@ export const AutoProcessMonitor = () => {
                 onValueChange={(v) => {
                   const next = v as 'boss_event' | 'throne_conquest' | 'world_boss';
                   setManualEventType(next);
-                  if (next === 'world_boss') setManualBossNpcId('922');
-                  else if (next === 'boss_event') setManualBossNpcId('');
+                  if (next === 'world_boss') {
+                    setManualBossNpcId('922');
+                    setManualBossHour('21:00');
+                  } else if (next === 'boss_event') {
+                    setManualBossNpcId('');
+                  }
                 }}
               >
                 <SelectTrigger>
@@ -501,23 +527,39 @@ export const AutoProcessMonitor = () => {
             </div>
 
             {manualEventType === 'boss_event' || manualEventType === 'world_boss' ? (
-              <div className="space-y-1.5">
-                <Label>Hora início</Label>
-                <Select
-                  value={manualBossHour}
-                  onValueChange={(v) => setManualBossHour(v as BossHourOption)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="19:00">19:00</SelectItem>
-                    <SelectItem value="20:00">20:00</SelectItem>
-                    <SelectItem value="22:00">22:00</SelectItem>
-                    <SelectItem value="22:30">22:30</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+              <>
+                <div className="space-y-1.5">
+                  <Label>Hora início</Label>
+                  <Select
+                    value={manualBossHour}
+                    onValueChange={(v) => setManualBossHour(v as BossHourOption)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="19:00">19:00</SelectItem>
+                      <SelectItem value="20:00">20:00</SelectItem>
+                      <SelectItem value="21:00">21:00</SelectItem>
+                      <SelectItem value="22:00">22:00</SelectItem>
+                      <SelectItem value="22:30">22:30</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {manualEventType === 'world_boss' && (
+                  <div className="space-y-1.5">
+                    <Label>Hora do kill</Label>
+                    <TimePicker
+                      hour={manualKillHour}
+                      minute={manualKillMinute}
+                      onChange={(h, m) => {
+                        setManualKillHour(h);
+                        setManualKillMinute(m);
+                      }}
+                    />
+                  </div>
+                )}
+              </>
             ) : (
               <>
                 <div className="space-y-1.5">
