@@ -53,10 +53,10 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
   // Pattern without asterisks (TXT format)
   const killPatternNoAsterisks = /:dagger:\s*(\w+)\s+matou\s+:skull:\s*(\w+)\s+no mapa/i;
   
-  // Map patterns for Boss Event (PvP Square) - supports Boss Event PvP and Platinum PvP servers
-  const mapPatternPvPSquareDoubleAsterisks = /\*\*PvP Square\*\*\s*-\s*\*\*\[Server: (?:Boss Event PvP|Platinum PvP)\]\*\*/i;
-  const mapPatternPvPSquareSingleAsterisks = /\*PvP Square\*\s*-\s*\*\[Server: (?:Boss Event PvP|Platinum PvP)\]\*/i;
-  const mapPatternPvPSquareNoAsterisks = /PvP Square\s*-\s*\[Server: (?:Boss Event PvP|Platinum PvP)\]/i;
+  // Map patterns for Boss Event (PvP Square / Silent Map)
+  const mapPatternPvPSquareDoubleAsterisks = /\*\*(?:PvP Square|Silent Map)\*\*\s*-\s*\*\*\[Server: (?:Boss Event PvP|Platinum PvP)\]\*\*/i;
+  const mapPatternPvPSquareSingleAsterisks = /\*(?:PvP Square|Silent Map)\*\s*-\s*\*\[Server: (?:Boss Event PvP|Platinum PvP)\]\*/i;
+  const mapPatternPvPSquareNoAsterisks = /(?:PvP Square|Silent Map)\s*-\s*\[Server: (?:Boss Event PvP|Platinum PvP)\]/i;
   
   // Map patterns for Throne Conquest (Devias)
   const mapPatternDeviasDoubleAsterisks = /\*\*Devias\*\*\s*-\s*\*\*\[Server: Boss Event PvP\]\*\*/i;
@@ -188,7 +188,7 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
   // 07/12/2025 20:01:02 - :dagger: Freezing matou :skull: HulkSmash no mapa :map: PvP Square - [Server: Boss Event PvP]
   // 27/01/2026 22:05:56 - :dagger: **ViidaBoa** matou :skull: **LOGAN** no mapa :map: **Devias** - **[Server: Boss Event PvP]**
   const singleLinePattern = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*-\s*:dagger:\s*\*{0,2}(\w+)\*{0,2}\s+matou\s+:skull:\s*\*{0,2}(\w+)\*{0,2}\s+no mapa\s+:map:\s*(.+)$/i;
-  const validMapPvPSquare = /^\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server: (?:Boss Event PvP|Platinum PvP)\]\*{0,2}$/i;
+  const validMapPvPSquare = /^\*{0,2}(?:PvP Square|Silent Map)\*{0,2}\s*-\s*\*{0,2}\[Server: (?:Boss Event PvP|Platinum PvP)\]\*{0,2}$/i;
   const validMapDevias = /^\*{0,2}Devias\*{0,2}\s*-\s*\*{0,2}\[Server: Boss Event PvP\]\*{0,2}$/i;
   const validMapWorldBoss =
     /^\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server: Platinum PvP\]\*{0,2}$/i;
@@ -299,7 +299,10 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
         
         const killerMatch = killerLine.match(/^(\w+)\s+matou\s+:skull:$/i);
         const victimMatch = victimLine.match(/^(\w+)\s+no mapa\s+:map:$/i);
-        const isValidMap = mapLine === 'PvP Square - [Server: Boss Event PvP]' || mapLine === 'PvP Square - [Server: Platinum PvP]';
+        const isValidMap =
+          mapLine === 'PvP Square - [Server: Boss Event PvP]' ||
+          mapLine === 'PvP Square - [Server: Platinum PvP]' ||
+          mapLine === 'Silent Map - [Server: Boss Event PvP]';
         
         if (killerMatch && victimMatch && isValidMap) {
           matchedEntries++;

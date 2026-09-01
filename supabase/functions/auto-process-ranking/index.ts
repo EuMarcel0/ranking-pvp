@@ -29,6 +29,134 @@ function extractBearerToken(authHeader: string | null): string {
   return authHeader.slice('Bearer '.length).trim();
 }
 
+/** Interpreta `YYYY-MM-DDTHH:MM[:SS]` como relógio local BRT (naive, sem TZ). */
+function parseLocalBrtParts(local: string): { y: number; mo: number; d: number; h: number; mi: number; s: number } {
+  const m = local.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) throw new Error(`Invalid local timestamp: ${local}`);
+  return {
+    y: Number(m[1]),
+    mo: Number(m[2]),
+    d: Number(m[3]),
+    h: Number(m[4]),
+    mi: Number(m[5]),
+    s: Number(m[6] || '0'),
+  };
+}
+
+/** Minutos desde epoch tratando o wall-clock BRT como se fosse UTC (só para aritmética). */
+function localBrtToUtcMs(local: string): number {
+  const p = parseLocalBrtParts(local);
+  return Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi, p.s);
+}
+
+function formatLocalBrtFromUtcMs(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const h = String(d.getUTCHours()).padStart(2, '0');
+  const mi = String(d.getUTCMinutes()).padStart(2, '0');
+  const s = String(d.getUTCSeconds()).padStart(2, '0');
+  return `${y}-${mo}-${day}T${h}:${mi}:${s}`;
+}
+
+/**
+ * Busca logs_pvp em fatias de tempo + keyset (sem OFFSET).
+ * Evita statement timeout em tabelas grandes no Supabase externo.
+ */
+async function fetchExternalLogsInRange(
+  // deno-lint-ignore no-explicit-any
+  externalClient: any,
+  localStartDate: string,
+  localEndDate: string,
+  chunkMinutes = 10,
+): Promise<ExternalLogEntry[]> {
+  const PAGE_SIZE = 1000;
+  const MAX_PAGES_PER_CHUNK = 8;
+  const startMs = localBrtToUtcMs(localStartDate);
+  let endMs = localBrtToUtcMs(localEndDate);
+  // Inclui o minuto final completo (UI manda HH:MM sem segundos)
+  if (!/T\d{2}:\d{2}:\d{2}/.test(localEndDate)) {
+    endMs += 59_000;
+  }
+  if (!(startMs < endMs)) {
+    console.warn(`[Auto Process] Invalid log window ${localStartDate} → ${localEndDate}`);
+    return [];
+  }
+
+  const chunkMs = Math.max(1, chunkMinutes) * 60_000;
+  const all: ExternalLogEntry[] = [];
+  const seen = new Set<string>();
+
+  const fetchChunk = async (chunkStart: number, chunkEnd: number, depth: number): Promise<void> => {
+    const chunkStartStr = formatLocalBrtFromUtcMs(chunkStart);
+    const chunkEndStr = formatLocalBrtFromUtcMs(chunkEnd);
+    let cursor: string | null = null;
+    let pages = 0;
+
+    while (pages < MAX_PAGES_PER_CHUNK) {
+      let query = externalClient
+        .from('logs_pvp')
+        .select('id, content, timestamp, created_at')
+        .gte('timestamp', chunkStartStr)
+        .lte('timestamp', chunkEndStr)
+        .order('timestamp', { ascending: false })
+        .limit(PAGE_SIZE);
+
+      if (cursor) {
+        query = query.lt('timestamp', cursor);
+      }
+
+      const { data: pageLogs, error: logsError } = await query;
+
+      if (logsError) {
+        const msg = logsError.message || '';
+        const isTimeout = /statement timeout|canceling statement/i.test(msg);
+        const spanMin = (chunkEnd - chunkStart) / 60_000;
+        if (isTimeout && spanMin > 1 && depth < 4) {
+          const mid = chunkStart + Math.floor((chunkEnd - chunkStart) / 2);
+          console.warn(
+            `[Auto Process] Timeout on ${chunkStartStr}→${chunkEndStr}; splitting (~${spanMin.toFixed(1)} min)`,
+          );
+          await fetchChunk(chunkStart, mid, depth + 1);
+          await fetchChunk(mid + 1000, chunkEnd, depth + 1);
+          return;
+        }
+        throw new Error(`Failed to fetch logs: ${msg}`);
+      }
+
+      if (!pageLogs || pageLogs.length === 0) break;
+
+      for (const row of pageLogs as ExternalLogEntry[]) {
+        const key = row.id || `${row.timestamp}|${row.content?.slice(0, 80)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        all.push(row);
+      }
+
+      pages++;
+      console.log(
+        `[Auto Process] Chunk ${chunkStartStr}→${chunkEndStr} page ${pages}: +${pageLogs.length} (total ${all.length})`,
+      );
+
+      if (pageLogs.length < PAGE_SIZE) break;
+      cursor = (pageLogs[pageLogs.length - 1] as ExternalLogEntry).timestamp;
+      if (!cursor) break;
+    }
+  };
+
+  for (let t = startMs; t <= endMs; t += chunkMs) {
+    const chunkEnd = Math.min(t + chunkMs - 1000, endMs);
+    await fetchChunk(t, chunkEnd, 0);
+  }
+
+  console.log(
+    `[Auto Process] Fetched ${all.length} logs in ~${Math.ceil((endMs - startMs) / chunkMs)} chunks ` +
+      `(${localStartDate} → ${localEndDate})`,
+  );
+  return all;
+}
+
 /** Decodifica payload JWT sem verificar assinatura (só para ler role/sub). */
 function peekJwtPayload(token: string): Record<string, unknown> | null {
   try {
@@ -424,8 +552,9 @@ function isDeviasBossEventLog(content: string): boolean {
 }
 
 function isPvPSquareBossEventLog(content: string): boolean {
+  // Hunt diário: PvP Square (legado) ou Silent Map (mapa atual do ADM)
   return (
-    /\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server:\s*(?:Boss Event PvP|Platinum PvP)\]\*{0,2}/i.test(
+    /\*{0,2}(?:PvP Square|Silent Map)\*{0,2}\s*-\s*\*{0,2}\[Server:\s*(?:Boss Event PvP|Platinum PvP)\]\*{0,2}/i.test(
       content,
     )
   );
@@ -931,37 +1060,13 @@ Deno.serve(async (req) => {
 
     const externalClient = createClient(externalUrl, externalKey);
 
-    // Query using local Brazil time (external DB stores timestamps in local time)
-    // Paginate to fetch ALL logs (Supabase default limit is 1000 per request)
-    const PAGE_SIZE = 1000;
-    const MAX_PAGES = 10;
-    let logs: ExternalLogEntry[] = [];
-    let page = 0;
-
-    while (page < MAX_PAGES) {
-      const from = page * PAGE_SIZE;
-      const to = from + PAGE_SIZE - 1;
-
-      const { data: pageLogs, error: logsError } = await externalClient
-        .from('logs_pvp')
-        .select('id, content, timestamp, created_at')
-        .gte('timestamp', localStartDate)
-        .lte('timestamp', localEndDate)
-        .order('timestamp', { ascending: false })
-        .range(from, to);
-
-      if (logsError) {
-        throw new Error(`Failed to fetch logs: ${logsError.message}`);
-      }
-
-      if (!pageLogs || pageLogs.length === 0) break;
-
-      logs = logs.concat(pageLogs as ExternalLogEntry[]);
-      console.log(`[Auto Process] Page ${page + 1}: fetched ${pageLogs.length} logs (total: ${logs.length})`);
-
-      if (pageLogs.length < PAGE_SIZE) break;
-      page++;
-    }
+    // Query em fatias + keyset — evita statement timeout no logs_pvp externo
+    let logs = await fetchExternalLogsInRange(
+      externalClient,
+      localStartDate,
+      localEndDate,
+      10,
+    );
 
     // Deduplicate external logs by their id to prevent duplicate kill entries
     const seenLogIds = new Set<string>();
