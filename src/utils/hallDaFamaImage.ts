@@ -103,17 +103,25 @@ export function buildHallFameSections(
     const meta = SECTION_META[key];
     const list = grouped[key];
     if (!meta || !list?.length) continue;
-    sections.push({
-      key,
-      label: meta.label,
-      emoji: meta.emoji,
-      entries: list.slice(0, 10).map((s, i) => ({
+    const entries = list
+      .filter((s) => {
+        const cls = s.player_class as string | null | undefined;
+        return !cls || !['Soul Wizard'].includes(String(cls));
+      })
+      .slice(0, 10)
+      .map((s, i) => ({
         position: Number(s.position ?? i + 1),
         player_name: String(s.player_name ?? ''),
         player_class: (s.player_class as string | null) ?? null,
         player_guild: (s.player_guild as string | null) ?? null,
         score: Number(s.score ?? 0),
-      })),
+      }));
+    if (entries.length === 0) continue;
+    sections.push({
+      key,
+      label: meta.label,
+      emoji: meta.emoji,
+      entries,
     });
   }
   return sections;

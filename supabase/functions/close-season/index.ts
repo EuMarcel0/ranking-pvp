@@ -1,4 +1,10 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import {
+  filterHallFameBestPerClass,
+  filterHallFameGrouped,
+  filterHallFameTop5,
+  isExcludedHallFameClass,
+} from '../_shared/hallFameFilters.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -86,36 +92,48 @@ function pickWebhook(target: 'prod' | 'homolog'): string | undefined {
     : Deno.env.get('DISCORD_WEBHOOK_URL');
 }
 
-async function buildGroupedFromActiveSeason(supabase: any) {
-  const { data: active, error: actErr } = await supabase
-    .from('seasons')
-    .select('id, name, started_at')
-    .eq('status', 'active')
-    .order('year', { ascending: false })
-    .order('month', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (actErr) throw actErr;
-  if (!active) throw new Error('Nenhuma temporada ativa encontrada');
+function firstDay(y: number, m: number) {
+  return `${y}-${String(m).padStart(2, '0')}-01`;
+}
 
-  const today = new Date().toISOString().slice(0, 10);
-  const dateFrom = active.started_at;
+function lastDay(y: number, m: number) {
+  const d = new Date(Date.UTC(y, m, 0));
+  return d.toISOString().slice(0, 10);
+}
 
+function brtTodayIso(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+}
+
+function seasonDateRange(year: number, month: number): { dateFrom: string; dateTo: string } {
+  const dateFrom = firstDay(year, month);
+  let dateTo = lastDay(year, month);
+  const today = brtTodayIso();
+  if (dateTo > today) dateTo = today;
+  return { dateFrom, dateTo };
+}
+
+async function buildGroupedForSeasonMonth(
+  supabase: ReturnType<typeof createClient>,
+  dateFrom: string,
+  dateTo: string,
+) {
   const [geral, reis, killStreak, mural, fogo, putinha] = await Promise.all([
-    supabase.rpc('get_ranking_geral', { p_date_from: dateFrom, p_date_to: today, p_hour_from: null, p_hour_to: null }),
-    supabase.rpc('get_ranking_reis_pvp', { p_date_from: dateFrom, p_date_to: today, p_event_type: 'boss_event' }),
-    supabase.rpc('get_ranking_kill_streak', { p_date_from: dateFrom, p_date_to: today, p_hour_from: null, p_hour_to: null, p_event_type: 'boss_event' }),
-    supabase.rpc('get_ranking_mural_vergonha', { p_date_from: dateFrom, p_date_to: today, p_hour_from: null, p_hour_to: null, p_event_type: 'boss_event' }),
-    supabase.rpc('get_ranking_fogo_amigo', { p_date_from: dateFrom, p_date_to: today, p_hour_from: null, p_hour_to: null, p_event_type: 'boss_event' }),
-    supabase.rpc('get_ranking_putinha', { p_date_from: dateFrom, p_date_to: today, p_hour_from: null, p_hour_to: null, p_event_type: 'boss_event' }),
+    supabase.rpc('get_ranking_geral', { p_date_from: dateFrom, p_date_to: dateTo, p_hour_from: null, p_hour_to: null }),
+    supabase.rpc('get_ranking_reis_pvp', { p_date_from: dateFrom, p_date_to: dateTo, p_event_type: 'boss_event' }),
+    supabase.rpc('get_ranking_kill_streak', { p_date_from: dateFrom, p_date_to: dateTo, p_hour_from: null, p_hour_to: null, p_event_type: 'boss_event' }),
+    supabase.rpc('get_ranking_mural_vergonha', { p_date_from: dateFrom, p_date_to: dateTo, p_hour_from: null, p_hour_to: null, p_event_type: 'boss_event' }),
+    supabase.rpc('get_ranking_fogo_amigo', { p_date_from: dateFrom, p_date_to: dateTo, p_hour_from: null, p_hour_to: null, p_event_type: 'boss_event' }),
+    supabase.rpc('get_ranking_putinha', { p_date_from: dateFrom, p_date_to: dateTo, p_hour_from: null, p_hour_to: null, p_event_type: 'boss_event' }),
   ]);
 
   const grouped: Record<string, any[]> = {};
 
   grouped['geral'] = (geral.data || []).slice()
+    .filter((r: any) => !isExcludedHallFameClass(r.player_class))
     .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
     .slice(0, 10)
-    .map((r: any, i: number) => ({ position: i + 1, player_name: r.player_name, player_class: r.player_class, score: r.event_score }));
+    .map((r: any, i: number) => ({ position: i + 1, player_name: r.player_name, player_class: r.player_class, player_guild: r.player_guild, score: r.event_score }));
 
   grouped['reis_pvp'] = (reis.data || []).filter((r: any) => r.is_rei)
     .sort((a: any, b: any) => Number(b.vezes) - Number(a.vezes) || Number(b.melhor_score) - Number(a.melhor_score))
@@ -128,26 +146,83 @@ async function buildGroupedFromActiveSeason(supabase: any) {
     .map((r: any, i: number) => ({ position: i + 1, player_name: r.player_name, score: r.pior_score }));
 
   grouped['kill_streak'] = (killStreak.data || []).slice()
+    .filter((r: any) => !isExcludedHallFameClass(r.player_class))
     .sort((a: any, b: any) => Number(b.max_streak) - Number(a.max_streak))
     .slice(0, 10)
-    .map((r: any, i: number) => ({ position: i + 1, player_name: r.player_name, player_class: r.player_class, score: r.max_streak }));
+    .map((r: any, i: number) => ({ position: i + 1, player_name: r.player_name, player_class: r.player_class, player_guild: r.player_guild, score: r.max_streak }));
 
   grouped['mural_vergonha'] = (mural.data || []).slice()
+    .filter((r: any) => !isExcludedHallFameClass(r.player_class))
     .sort((a: any, b: any) => Number(b.total_deaths) - Number(a.total_deaths))
     .slice(0, 10)
-    .map((r: any, i: number) => ({ position: i + 1, player_name: r.player_name, player_class: r.player_class, score: r.total_deaths }));
+    .map((r: any, i: number) => ({ position: i + 1, player_name: r.player_name, player_class: r.player_class, player_guild: r.player_guild, score: r.total_deaths }));
 
   grouped['fogo_amigo'] = (fogo.data || []).slice()
+    .filter((r: any) => !isExcludedHallFameClass(r.player_class))
     .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
     .slice(0, 10)
-    .map((r: any, i: number) => ({ position: i + 1, player_name: r.player_name, player_class: r.player_class, score: r.event_score }));
+    .map((r: any, i: number) => ({ position: i + 1, player_name: r.player_name, player_class: r.player_class, player_guild: r.player_guild, score: r.event_score }));
 
   grouped['putinha'] = (putinha.data || []).slice()
     .sort((a: any, b: any) => Number(b.deaths) - Number(a.deaths))
     .slice(0, 10)
     .map((r: any, i: number) => ({ position: i + 1, player_name: `${r.killer_name} → ${r.victim_name}`, score: r.deaths }));
 
+  return grouped;
+}
+
+async function buildGroupedFromActiveSeason(supabase: ReturnType<typeof createClient>) {
+  const { data: active, error: actErr } = await supabase
+    .from('seasons')
+    .select('id, name, year, month, started_at')
+    .eq('status', 'active')
+    .order('year', { ascending: false })
+    .order('month', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (actErr) throw actErr;
+  if (!active) throw new Error('Nenhuma temporada ativa encontrada');
+
+  const { dateFrom, dateTo } = seasonDateRange(active.year, active.month);
+  const grouped = await buildGroupedForSeasonMonth(supabase, dateFrom, dateTo);
+
   return { season: active, grouped };
+}
+
+async function loadHallGroupedForSeason(
+  supabase: ReturnType<typeof createClient>,
+  seasonId: string,
+): Promise<{ seasonName: string; grouped: Record<string, any[]>; source: 'snapshots' | 'live' }> {
+  const { data: season, error } = await supabase
+    .from('seasons')
+    .select('id, name, year, month, status')
+    .eq('id', seasonId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!season) throw new Error('Temporada não encontrada');
+
+  if (season.status === 'closed') {
+    const { data: snaps, error: snapErr } = await supabase
+      .from('season_snapshots')
+      .select('*')
+      .eq('season_id', seasonId)
+      .order('ranking_type')
+      .order('position');
+    if (snapErr) throw snapErr;
+
+    const grouped: Record<string, any[]> = {};
+    for (const s of snaps || []) (grouped[s.ranking_type] ||= []).push(s);
+
+    const filtered = filterHallFameGrouped(grouped);
+    const hasRows = Object.values(filtered).some((l) => l.length > 0);
+    if (hasRows) {
+      return { seasonName: season.name, grouped: filtered, source: 'snapshots' };
+    }
+  }
+
+  const { dateFrom, dateTo } = seasonDateRange(season.year, season.month);
+  const grouped = await buildGroupedForSeasonMonth(supabase, dateFrom, dateTo);
+  return { seasonName: season.name, grouped, source: 'live' };
 }
 
 Deno.serve(async (req) => {
@@ -166,7 +241,30 @@ Deno.serve(async (req) => {
     const postImage: boolean = body?.post_image === true;
     const skipDiscord: boolean = body?.skip_discord === true;
     const winnersMode: boolean = body?.winners === true;
+    const hallDataMode: boolean = body?.hall_data === true;
     const target: 'prod' | 'homolog' = body?.target === 'prod' ? 'prod' : (body?.target === 'homolog' ? 'homolog' : 'prod');
+
+    // ===== HALL DATA: snapshots (fechada) ou RPC do mês (ativa / fallback) =====
+    if (hallDataMode) {
+      const seasonId: string | undefined = body?.season_id;
+      if (!seasonId) throw new Error('season_id é obrigatório no modo hall_data');
+
+      const { seasonName, grouped, source } = await loadHallGroupedForSeason(supabase, seasonId);
+      const totalRows = Object.values(grouped).reduce((acc, l) => acc + l.length, 0);
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          mode: 'hall_data',
+          season: seasonName,
+          season_id: seasonId,
+          source,
+          snapshots: totalRows,
+          grouped,
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
 
     // ===== POST IMAGE MODE: PNG gerado no front → Discord =====
     if (postImage) {
@@ -208,14 +306,6 @@ Deno.serve(async (req) => {
       let dateFrom: string;
       let dateTo: string;
 
-      // Helpers: first/last day of the season's month (YYYY-MM-DD)
-      const firstDay = (y: number, m: number) =>
-        `${y}-${String(m).padStart(2, '0')}-01`;
-      const lastDay = (y: number, m: number) => {
-        const d = new Date(Date.UTC(y, m, 0)); // day 0 of next month = last day of m
-        return d.toISOString().slice(0, 10);
-      };
-
       if (body?.season_id) {
         const { data: s } = await supabase
           .from('seasons')
@@ -224,8 +314,7 @@ Deno.serve(async (req) => {
           .maybeSingle();
         if (!s) throw new Error('Temporada não encontrada');
         seasonName = s.name;
-        dateFrom = firstDay(s.year, s.month);
-        dateTo = lastDay(s.year, s.month);
+        ({ dateFrom, dateTo } = seasonDateRange(s.year, s.month));
       } else {
         const { data: active } = await supabase
           .from('seasons')
@@ -237,8 +326,7 @@ Deno.serve(async (req) => {
           .maybeSingle();
         if (!active) throw new Error('Nenhuma temporada ativa');
         seasonName = active.name;
-        dateFrom = firstDay(active.year, active.month);
-        dateTo = lastDay(active.year, active.month);
+        ({ dateFrom, dateTo } = seasonDateRange(active.year, active.month));
       }
 
       const [geralRes, classRes] = await Promise.all([
@@ -248,37 +336,41 @@ Deno.serve(async (req) => {
       if (geralRes.error) throw geralRes.error;
       if (classRes.error) throw classRes.error;
 
-      const top5 = (geralRes.data || [])
-        .slice()
-        .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
-        .slice(0, 5)
-        .map((r: any, i: number) => ({
-          position: i + 1,
-          player_name: r.player_name,
-          player_class: r.player_class,
-          player_guild: r.player_guild,
-          kills: Number(r.total_kills),
-          deaths: Number(r.total_deaths),
-          kda: Number(r.kda),
-          matches: Number(r.matches_played),
-          score: Number(r.event_score),
-        }));
+      const top5 = filterHallFameTop5(
+        (geralRes.data || [])
+          .slice()
+          .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
+          .slice(0, 10)
+          .map((r: any, i: number) => ({
+            position: i + 1,
+            player_name: r.player_name,
+            player_class: r.player_class,
+            player_guild: r.player_guild,
+            kills: Number(r.total_kills),
+            deaths: Number(r.total_deaths),
+            kda: Number(r.kda),
+            matches: Number(r.matches_played),
+            score: Number(r.event_score),
+          })),
+      );
 
-      const bestPerClass = (classRes.data || [])
-        .filter((r: any) => r.is_best)
-        .slice()
-        .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
-        .map((r: any) => ({
-          class_name: r.class_name,
-          player_name: r.player_name,
-          kills: Number(r.total_kills),
-          deaths: Number(r.total_deaths),
-          kda: Number(r.total_kda),
-          matches: Number(r.match_count),
-          score: Number(r.event_score),
-        }));
+      const bestPerClass = filterHallFameBestPerClass(
+        (classRes.data || [])
+          .filter((r: any) => r.is_best)
+          .slice()
+          .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
+          .map((r: any) => ({
+            class_name: r.class_name,
+            player_name: r.player_name,
+            kills: Number(r.total_kills),
+            deaths: Number(r.total_deaths),
+            kda: Number(r.total_kda),
+            matches: Number(r.match_count),
+            score: Number(r.event_score),
+          })),
+      );
 
-      const payload = { season: seasonName, top5, bestPerClass };
+      const payload = { season: seasonName, dateFrom, dateTo, top5, bestPerClass };
 
       let discordPosted = false;
       if (!skipDiscord) {

@@ -13,6 +13,7 @@ import { useUserRole } from '@/hooks/useUserRole';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { buildHallFameSections, renderHallDaFamaImage } from '@/utils/hallDaFamaImage';
+import { filterHallFameBestPerClass, filterHallFameGrouped, filterHallFameTop5 } from '@/utils/hallFameFilters';
 
 const RANKING_META: Record<string, { label: string; icon: any; color: string }> = {
   geral: { label: 'Ranking Geral', icon: Trophy, color: 'text-yellow-400' },
@@ -215,35 +216,48 @@ export const HallDaFama = () => {
   });
 
   const buildMonthlyImageDataUrl = async (forDiscord = false) => {
-    let seasonName = currentSeason?.name || activeSeason?.name || 'Temporada';
-    let groupedData: Record<string, any[]> = grouped;
-    let top5: any[] = winnersData?.top5 ?? [];
-    let bestPerClass: any[] = winnersData?.bestPerClass ?? [];
-    const seasonIdForWinners = currentId || activeSeason?.id;
+    // Prioriza temporada fechada selecionada / mais recente — evita post vazio no dia 1 (temporada ativa = mês novo)
+    const postSeasonId =
+      currentId ||
+      closedSeasons[0]?.id ||
+      activeSeason?.id;
 
-    const hasHallRows = Object.values(groupedData).some((l) => l?.length > 0);
-    if (!hasHallRows) {
-      const { data, error } = await supabase.functions.invoke('close-season', {
-        body: { preview: true, skip_discord: true },
-      });
-      if (error) throw error;
-      seasonName = data?.season ?? seasonName;
-      groupedData = data?.grouped ?? {};
+    if (!postSeasonId) {
+      throw new Error('Nenhuma temporada disponível para montar a imagem.');
     }
 
-    if ((!top5.length && !bestPerClass.length) && seasonIdForWinners) {
-      const { data, error } = await supabase.functions.invoke('close-season', {
-        body: { winners: true, season_id: seasonIdForWinners, skip_discord: true },
-      });
-      if (error) throw error;
-      seasonName = data?.season ?? seasonName;
-      top5 = data?.top5 ?? [];
-      bestPerClass = data?.bestPerClass ?? [];
-    }
+    const [{ data: hallData, error: hallErr }, { data: winnersPayload, error: winnersErr }] =
+      await Promise.all([
+        supabase.functions.invoke('close-season', {
+          body: { hall_data: true, season_id: postSeasonId, skip_discord: true },
+        }),
+        supabase.functions.invoke('close-season', {
+          body: { winners: true, season_id: postSeasonId, skip_discord: true },
+        }),
+      ]);
+
+    if (hallErr) throw hallErr;
+    if (winnersErr) throw winnersErr;
+
+    const seasonName =
+      hallData?.season ??
+      winnersPayload?.season ??
+      currentSeason?.name ??
+      activeSeason?.name ??
+      'Temporada';
+
+    const groupedData = filterHallFameGrouped(hallData?.grouped ?? {});
+    const top5 = filterHallFameTop5(winnersPayload?.top5 ?? []);
+    const bestPerClass = filterHallFameBestPerClass(winnersPayload?.bestPerClass ?? []);
 
     const hallSections = buildHallFameSections(groupedData);
-    if (hallSections.length === 0 && top5.length === 0 && bestPerClass.length === 0) {
-      throw new Error('Não há rankings para montar a imagem.');
+    const hasHall = hallSections.some((s) => s.entries.length > 0);
+    const hasWinners = top5.length > 0 || bestPerClass.length > 0;
+
+    if (!hasHall && !hasWinners) {
+      throw new Error(
+        `Não há rankings para ${seasonName}. Verifique se a temporada foi fechada ou se houve eventos no período.`,
+      );
     }
 
     const dataUrl = renderHallDaFamaImage({
@@ -476,7 +490,9 @@ export const HallDaFama = () => {
                     <p className="text-sm text-muted-foreground italic">Sem dados por classe no período.</p>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                      {winnersData.bestPerClass.map((b: any) => (
+                      {winnersData.bestPerClass
+                        .filter((b: any) => b.class_name !== 'Soul Wizard')
+                        .map((b: any) => (
                         <div
                           key={b.class_name}
                           className="flex items-center justify-between gap-2 p-3 rounded-md border border-border/60 bg-card/40"

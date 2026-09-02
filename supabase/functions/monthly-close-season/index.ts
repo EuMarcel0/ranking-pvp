@@ -4,6 +4,11 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import {
+  filterHallFameBestPerClass,
+  filterHallFameGrouped,
+  filterHallFameTop5,
+} from '../_shared/hallFameFilters.ts';
+import {
   buildHallFameSections,
   pngToBase64,
   renderMonthlyHallPng,
@@ -139,33 +144,37 @@ Deno.serve(async (req) => {
     if (geralRes.error) throw geralRes.error;
     if (classRes.error) throw classRes.error;
 
-    const top5: WinnersTopEntry[] = (geralRes.data || [])
-      .slice()
-      .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
-      .slice(0, 5)
-      .map((r: any, i: number) => ({
-        position: i + 1,
-        player_name: r.player_name,
-        player_class: r.player_class,
-        player_guild: r.player_guild,
-        kills: Number(r.total_kills),
-        deaths: Number(r.total_deaths),
-        kda: Number(r.kda),
-        score: Number(r.event_score),
-      }));
+    const top5: WinnersTopEntry[] = filterHallFameTop5(
+      (geralRes.data || [])
+        .slice()
+        .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
+        .slice(0, 10)
+        .map((r: any, i: number) => ({
+          position: i + 1,
+          player_name: r.player_name,
+          player_class: r.player_class,
+          player_guild: r.player_guild,
+          kills: Number(r.total_kills),
+          deaths: Number(r.total_deaths),
+          kda: Number(r.kda),
+          score: Number(r.event_score),
+        })),
+    );
 
-    const bestPerClass: BestPerClassEntry[] = (classRes.data || [])
-      .filter((r: any) => r.is_best)
-      .slice()
-      .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
-      .map((r: any) => ({
-        class_name: r.class_name,
-        player_name: r.player_name,
-        kills: Number(r.total_kills),
-        deaths: Number(r.total_deaths),
-        kda: Number(r.total_kda),
-        score: Number(r.event_score),
-      }));
+    const bestPerClass: BestPerClassEntry[] = filterHallFameBestPerClass(
+      (classRes.data || [])
+        .filter((r: any) => r.is_best)
+        .slice()
+        .sort((a: any, b: any) => Number(b.event_score) - Number(a.event_score))
+        .map((r: any) => ({
+          class_name: r.class_name,
+          player_name: r.player_name,
+          kills: Number(r.total_kills),
+          deaths: Number(r.total_deaths),
+          kda: Number(r.total_kda),
+          score: Number(r.event_score),
+        })),
+    );
 
     // 2) Fecha temporada (gera snapshots do Hall da Fama)
     const { data: closeData, error: closeErr } = await supabase.rpc('close_current_season');
@@ -189,12 +198,16 @@ Deno.serve(async (req) => {
     const grouped: Record<string, any[]> = {};
     for (const s of snaps || []) (grouped[s.ranking_type] ||= []).push(s);
 
+    const filteredGrouped = filterHallFameGrouped(grouped);
+
     // Garante ordem estável
     for (const key of SECTION_ORDER) {
-      if (grouped[key]) grouped[key].sort((a, b) => Number(a.position) - Number(b.position));
+      if (filteredGrouped[key]) {
+        filteredGrouped[key].sort((a, b) => Number(a.position) - Number(b.position));
+      }
     }
 
-    const hallSections = buildHallFameSections(grouped);
+    const hallSections = buildHallFameSections(filteredGrouped);
 
     // 3) Gera PNG
     const png = await renderMonthlyHallPng({
