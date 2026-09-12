@@ -4,7 +4,7 @@
  * Square: qualquer +1 dispara post; lookback amplo + sessão por gap de idle
  * (auto-process corta no início real do PvP — 19h/20h/22h etc.).
  * Selupan: também é boss diário PvE — só posta se houver World Boss PvP
- * (volume mínimo de kills em Platinum Square / Raklion); senão só atualiza baseline.
+ * (volume mínimo de kills em Vulcanus / Platinum Square / Raklion); senão só atualiza baseline.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 

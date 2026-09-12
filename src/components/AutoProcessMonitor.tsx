@@ -195,7 +195,7 @@ export const AutoProcessMonitor = () => {
         toast({
           title: selupanSkip ? 'Selupan diário ignorado' : 'Detector executado',
           description: selupanSkip
-            ? 'Kill do Selupan sem World Boss PvP em Raklion — baseline atualizado, ranking não postado.'
+            ? 'Kill do Selupan sem World Boss PvP (Vulcanus) — baseline atualizado, ranking não postado.'
             : 'Nenhum +1 nos NPCs 922/968/966 (baseline atualizado se necessário).',
         });
       }
@@ -468,7 +468,7 @@ export const AutoProcessMonitor = () => {
             <div>
               <CardTitle>Monitoramento de Processamento Automático</CardTitle>
               <CardDescription className="mt-1">
-                968/966: +1 posta; início da sessão por gap de idle no PvP Square (19h/20h/22h…). 922 Selupan: só World Boss PvP.
+                968/966: +1 posta; início da sessão por gap de idle no PvP Square (19h/20h/22h…). 922 Selupan: só World Boss PvP (Vulcanus).
               </CardDescription>
             </div>
           </div>

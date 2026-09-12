@@ -52,6 +52,9 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
   
   // Pattern without asterisks (TXT format)
   const killPatternNoAsterisks = /:dagger:\s*(\w+)\s+matou\s+:skull:\s*(\w+)\s+no mapa/i;
+  // Sem :dagger: (formato ocasional do Discord)
+  const killPatternNoDagger =
+    /(?:\*{0,2})(\w+)(?:\*{0,2})\s+matou\s+:skull:\s*(?:\*{0,2})(\w+)(?:\*{0,2})\s+no mapa/i;
   
   // Map patterns for Boss Event (PvP Square / Silent Map)
   const mapPatternPvPSquareDoubleAsterisks = /\*\*(?:PvP Square|Silent Map)\*\*\s*-\s*\*\*\[Server: (?:Boss Event PvP|Platinum PvP)\]\*\*/i;
@@ -81,6 +84,7 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
                         mapPatternDeviasNoAsterisks.test(content);
 
     const isWorldBossMap =
+      (/\*{0,2}Vulcanus\*{0,2}\s*-\s*\*{0,2}\[Server:\s*Boss Event PvP\]\*{0,2}/i.test(content)) ||
       (/PvP Square/i.test(content) && /\[Server:\s*Platinum PvP\]/i.test(content)) ||
       (/Raklion/i.test(content) && !isDeviasMap && !isPvPSquareMap);
     
@@ -124,6 +128,9 @@ export const parseExternalDbContent = (logs: ExternalLogEntry[], targetEventType
     }
     if (!killMatch) {
       killMatch = content.match(killPatternNoAsterisks);
+    }
+    if (!killMatch) {
+      killMatch = content.match(killPatternNoDagger);
     }
     
     if (killMatch) {
@@ -187,10 +194,12 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
   // Single-line format (most common):
   // 07/12/2025 20:01:02 - :dagger: Freezing matou :skull: HulkSmash no mapa :map: PvP Square - [Server: Boss Event PvP]
   // 27/01/2026 22:05:56 - :dagger: **ViidaBoa** matou :skull: **LOGAN** no mapa :map: **Devias** - **[Server: Boss Event PvP]**
-  const singleLinePattern = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*-\s*:dagger:\s*\*{0,2}(\w+)\*{0,2}\s+matou\s+:skull:\s*\*{0,2}(\w+)\*{0,2}\s+no mapa\s+:map:\s*(.+)$/i;
+  const singleLinePattern = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*-\s*(?::dagger:\s*)?\*{0,2}(\w+)\*{0,2}\s+matou\s+:skull:\s*\*{0,2}(\w+)\*{0,2}\s+no mapa\s+:map:\s*(.+)$/i;
   const validMapPvPSquare = /^\*{0,2}(?:PvP Square|Silent Map)\*{0,2}\s*-\s*\*{0,2}\[Server: (?:Boss Event PvP|Platinum PvP)\]\*{0,2}$/i;
   const validMapDevias = /^\*{0,2}Devias\*{0,2}\s*-\s*\*{0,2}\[Server: Boss Event PvP\]\*{0,2}$/i;
   const validMapWorldBoss =
+    /^\*{0,2}Vulcanus\*{0,2}\s*-\s*\*{0,2}\[Server: Boss Event PvP\]\*{0,2}$/i;
+  const validMapWorldBossPlatinum =
     /^\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server: Platinum PvP\]\*{0,2}$/i;
   const validMapWorldBossRaklion = /^\*{0,2}.*Raklion.*$/i;
 
@@ -212,7 +221,11 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
       const isPvPSquare = validMapPvPSquare.test(mapPart);
       const isDevias = validMapDevias.test(mapPart);
       const isWorldBoss =
-        !isDevias && (validMapWorldBoss.test(mapPart) || validMapWorldBossRaklion.test(mapPart));
+        !isDevias &&
+        !isPvPSquare &&
+        (validMapWorldBoss.test(mapPart) ||
+          validMapWorldBossPlatinum.test(mapPart) ||
+          validMapWorldBossRaklion.test(mapPart));
       
       // If target event type is specified, filter by it
       if (targetEventType === 'boss_event' && !isPvPSquare) {
@@ -302,7 +315,8 @@ export const parseTxtFile = (content: string, targetEventType?: EventType): Pars
         const isValidMap =
           mapLine === 'PvP Square - [Server: Boss Event PvP]' ||
           mapLine === 'PvP Square - [Server: Platinum PvP]' ||
-          mapLine === 'Silent Map - [Server: Boss Event PvP]';
+          mapLine === 'Silent Map - [Server: Boss Event PvP]' ||
+          mapLine === 'Vulcanus - [Server: Boss Event PvP]';
         
         if (killerMatch && victimMatch && isValidMap) {
           matchedEntries++;

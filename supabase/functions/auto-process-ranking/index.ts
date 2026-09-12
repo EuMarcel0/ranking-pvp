@@ -248,7 +248,7 @@ const BOSS_NPC_NAMES: Record<number, string> = {
 
 /**
  * Selupan (922) também é boss diário PvE. Só consideramos World Boss PvP
- * quando há volume mínimo de kills no mapa do evento (Platinum Square / Raklion).
+ * quando há volume mínimo de kills no mapa do evento (Vulcanus / Platinum Square / Raklion).
  * Manual sync (trigger !== boss_kill) ignora esse limiar.
  */
 const WORLD_BOSS_MIN_PVP_KILLS = 15;
@@ -537,6 +537,10 @@ const KILL_PATTERNS = [
   /:dagger:\s*\*\*(\w+)\*\*\s*matou\s*:skull:\s*\*\*(\w+)\*\*/i,
   /:dagger:\s*\*(\w+)\*\s*matou\s*:skull:\s*\*(\w+)\*/i,
   /:dagger:\s*(\w+)\s+matou\s+:skull:\s*(\w+)\s+no mapa/i,
+  // Discord às vezes omite :dagger: (ex.: World Boss Vulcanus)
+  /\*\*(\w+)\*\*\s*matou\s*:skull:\s*\*\*(\w+)\*\*/i,
+  /\*(\w+)\*\s*matou\s*:skull:\s*\*(\w+)\*/i,
+  /(\w+)\s+matou\s+:skull:\s*(\w+)\s+no mapa/i,
 ] as const;
 
 function matchKill(content: string): { killer: string; victim: string } | null {
@@ -561,18 +565,23 @@ function isPvPSquareBossEventLog(content: string): boolean {
 }
 
 /**
- * Selupan World Boss PvP (VIP Platinum):
- * logs em PvP Square - [Server: Platinum PvP].
- * Raklion permanece como fallback (eventos open-world antigos).
+ * Selupan World Boss PvP:
+ * - Vulcanus - [Server: Boss Event PvP] (mapa atual)
+ * - PvP Square - [Server: Platinum PvP] (legado VIP)
+ * - Raklion (fallback open-world antigo)
  */
 function isWorldBossEventLog(content: string): boolean {
+  const vulcanus =
+    /\*{0,2}Vulcanus\*{0,2}\s*-\s*\*{0,2}\[Server:\s*Boss Event PvP\]\*{0,2}/i.test(content);
+  if (vulcanus) return true;
+
   const platinumSquare =
     /\*{0,2}PvP Square\*{0,2}\s*-\s*\*{0,2}\[Server:\s*Platinum PvP\]\*{0,2}/i.test(content);
   if (platinumSquare) return true;
 
   if (!/Raklion/i.test(content)) return false;
   if (isDeviasBossEventLog(content)) return false;
-  return /:dagger:/.test(content) && /matou/i.test(content);
+  return /matou/i.test(content) && /:skull:/i.test(content);
 }
 
 function accumulateKillStats(
@@ -1151,7 +1160,7 @@ Deno.serve(async (req) => {
       return { success: true, status: 'no_players', message: 'No valid player data', matchDate, matchHour, eventType };
     }
 
-    // Selupan diário (PvE): +1 no monster_kill sem PvP relevante em Raklion → não postar
+    // Selupan diário (PvE): +1 no monster_kill sem PvP relevante (Vulcanus/etc.) → não postar
     if (isWorldBossEvent && body.trigger === 'boss_kill') {
       const pvpKills = parseResult.killLogs.length;
       const uniquePlayers = Object.keys(parseResult.players).length;
@@ -1164,7 +1173,7 @@ Deno.serve(async (req) => {
           success: true,
           status: 'skipped_normal_selupan',
           message:
-            'Kill de Selupan sem volume de PvP no World Boss (Platinum Square/Raklion). Ranking não postado.',
+            'Kill de Selupan sem volume de PvP no World Boss (Vulcanus/Platinum/Raklion). Ranking não postado.',
           matchDate,
           matchHour,
           eventType,

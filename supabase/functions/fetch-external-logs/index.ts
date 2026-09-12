@@ -103,9 +103,9 @@ Deno.serve(async (req) => {
           'content.ilike.%PvP Square%[Server: Boss Event PvP]%,content.ilike.%PvP Square%[Server: Platinum PvP]%,content.ilike.%Silent Map%[Server: Boss Event PvP]%',
         );
       } else if (mapFilter === 'world_boss') {
-        // Selupan World Boss: Platinum PvP Square (principal) ou Raklion (fallback)
+        // Selupan World Boss: Vulcanus (atual), Platinum Square ou Raklion (legado)
         query = query.or(
-          'and(content.ilike.%PvP Square%,content.ilike.%[Server: Platinum PvP]%),content.ilike.%Raklion%',
+          'and(content.ilike.%Vulcanus%,content.ilike.%[Server: Boss Event PvP]%),and(content.ilike.%PvP Square%,content.ilike.%[Server: Platinum PvP]%),content.ilike.%Raklion%',
         );
       }
 
