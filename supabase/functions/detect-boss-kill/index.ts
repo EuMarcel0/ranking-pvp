@@ -27,6 +27,8 @@ const SQUARE_LOOKBACK_MINUTES = 210;
 const WORLD_BOSS_LOOKBACK_MINUTES = 240;
 /** Evita reprocessar o mesmo npc se o poll oscilar no mesmo minuto */
 const DEDUPE_MINUTES = 3;
+/** Espera loot/clear + dá tempo do PvP continuar antes do 1º attempt de post */
+const POST_DELAY_MINUTES = 4;
 
 function lookbackMinutesForNpc(npcId: number): number {
   return npcId === WORLD_BOSS_NPC_ID ? WORLD_BOSS_LOOKBACK_MINUTES : SQUARE_LOOKBACK_MINUTES;
@@ -180,6 +182,20 @@ function isSquareBossNpc(npcId: number): boolean {
   return npcId !== WORLD_BOSS_NPC_ID;
 }
 
+async function hasOpenTriggerForNpc(
+  client: SupabaseClient,
+  npcId: number,
+): Promise<boolean> {
+  const { data } = await client
+    .from('boss_kill_triggers')
+    .select('id')
+    .eq('npc_id', npcId)
+    .eq('event_type', eventTypeForNpc(npcId))
+    .is('posted_at', null)
+    .limit(1);
+  return (data?.length ?? 0) > 0;
+}
+
 async function recentlyPostedForNpc(
   client: SupabaseClient,
   npcId: number,
@@ -257,16 +273,16 @@ async function postPendingTrigger(
   const processJson = await processRes.json().catch(() => ({}));
   const status = processJson?.status as string | undefined;
 
-  // Selupan diário (PvE): sem PvP relevante → fecha o trigger e deixa o caller atualizar baseline
-  const selupanNormalSkip =
-    pending.npc_id === WORLD_BOSS_NPC_ID &&
-    (status === 'skipped_normal_selupan' ||
-      status === 'no_players' ||
-      status === 'no_logs');
+  // Selupan diário (PvE) / Square sem volume: fecha o trigger sem postar Discord
+  const quietSkip =
+    status === 'skipped_normal_selupan' ||
+    status === 'skipped_insufficient_square_pvp' ||
+    (pending.npc_id === WORLD_BOSS_NPC_ID &&
+      (status === 'no_players' || status === 'no_logs'));
 
-  if (selupanNormalSkip) {
+  if (quietSkip) {
     console.log(
-      `[DetectBossKill] Selupan normal (não World Boss PvP): ${pending.killer_name} status=${status}`,
+      `[DetectBossKill] Skip sem post: ${pending.killer_name} npc=${pending.npc_id} status=${status}`,
     );
     await client
       .from('boss_kill_triggers')
@@ -275,7 +291,7 @@ async function postPendingTrigger(
 
     return {
       ok: true,
-      skipped: 'normal_selupan_kill',
+      skipped: status ?? 'quiet_skip',
       npcId: pending.npc_id,
       killer: pending.killer_name,
       boss: bossNpcLabel(pending.npc_id),
@@ -289,7 +305,8 @@ async function postPendingTrigger(
     status !== 'no_logs' &&
     status !== 'no_players' &&
     status !== 'postponed' &&
-    status !== 'skipped_normal_selupan';
+    status !== 'skipped_normal_selupan' &&
+    status !== 'skipped_insufficient_square_pvp';
 
   if (!processOk) {
     console.error('[DetectBossKill] auto-process failed, will retry next poll:', processJson);
@@ -337,11 +354,13 @@ Deno.serve(async (req) => {
     const npcResults: Array<Record<string, unknown>> = [];
     const triggeredList: Array<Record<string, unknown>> = [];
 
-    // Drena postagens pendentes
+    // Drena postagens pendentes (respeita post_after = detecção + delay)
+    const nowIso = new Date().toISOString();
     const { data: dueRows, error: dueErr } = await client
       .from('boss_kill_triggers')
       .select('id, match_date, match_hour, match_minute, npc_id, killer_name')
       .is('posted_at', null)
+      .lte('post_after', nowIso)
       .order('triggered_at', { ascending: true })
       .limit(5);
 
@@ -380,6 +399,21 @@ Deno.serve(async (req) => {
         continue;
       }
 
+      if (await hasOpenTriggerForNpc(client, npcId)) {
+        // Já há post pendente (delay/idle) — consome o +1 e atualiza o killer mais recente
+        await saveBaseline(client, npcId, current);
+        await client
+          .from('boss_kill_triggers')
+          .update({ killer_name: killer.name })
+          .eq('npc_id', npcId)
+          .eq('event_type', eventTypeForNpc(npcId))
+          .is('posted_at', null);
+        npcResult.skipped = 'pending_open_trigger';
+        npcResult.killer = killer.name;
+        npcResults.push(npcResult);
+        continue;
+      }
+
       const eventType = eventTypeForNpc(npcId);
 
       // Lock por minuto da detecção (a partida Square é ancorada depois pela sessão de logs)
@@ -403,7 +437,7 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      const nowIso = new Date().toISOString();
+      const postAfter = addMinutes(new Date(), POST_DELAY_MINUTES).toISOString();
       const { data: lockRow, error: lockErr } = await client
         .from('boss_kill_triggers')
         .insert({
@@ -413,7 +447,7 @@ Deno.serve(async (req) => {
           event_type: eventType,
           npc_id: npcId,
           killer_name: killer.name,
-          post_after: nowIso,
+          post_after: postAfter,
           posted_at: null,
         })
         .select('id')
@@ -426,52 +460,31 @@ Deno.serve(async (req) => {
         continue;
       }
 
+      // Consome o +1 agora; o post só roda depois de post_after (+ idle no auto-process)
+      await saveBaseline(client, npcId, current);
+
       console.log(
         `[DetectBossKill] Boss kill detected: ${killer.name} ` +
           `boss=${bossNpcLabel(npcId)} (${npcId}) ` +
           `at=${today} ${detectHour}:${String(detectMinute).padStart(2, '0')} ` +
+          `post_after=${postAfter} ` +
           `(${killer.prev}->${killer.next}, delta=${killer.delta})`,
       );
 
-      const result = await postPendingTrigger(
-        supabaseUrl,
-        serviceKey,
-        client,
-        {
-          id: lockRow.id,
-          match_date: today,
-          match_hour: detectHour,
-          match_minute: detectMinute,
-          npc_id: npcId,
-          killer_name: killer.name,
-        },
-        brt,
-      );
-
-      if (!result.ok) {
-        await client.from('boss_kill_triggers').delete().eq('id', lockRow.id);
-        npcResult.processFailed = result.process;
-        npcResults.push(npcResult);
-        continue;
-      }
-
-      await saveBaseline(client, npcId, current);
-      if (result.skipped === 'normal_selupan_kill') {
-        npcResult.skipped = 'normal_selupan_kill';
-        npcResult.killer = killer.name;
-      } else {
-        triggeredList.push(result);
-      }
+      npcResult.queued = true;
+      npcResult.postAfter = postAfter;
+      npcResult.killer = killer.name;
       npcResults.push(npcResult);
     }
 
     return new Response(
       JSON.stringify({
         success: true,
-        mode: 'session_gap',
+        mode: 'session_gap_delayed',
         brt: brt.toISOString(),
         squareLookbackMinutes: SQUARE_LOOKBACK_MINUTES,
         worldBossLookbackMinutes: WORLD_BOSS_LOOKBACK_MINUTES,
+        postDelayMinutes: POST_DELAY_MINUTES,
         npcs: npcResults,
         triggered: triggeredList[0] ?? null,
         triggeredAll: triggeredList,

@@ -253,6 +253,9 @@ const BOSS_NPC_NAMES: Record<number, string> = {
  */
 const WORLD_BOSS_MIN_PVP_KILLS = 15;
 const WORLD_BOSS_MIN_UNIQUE_PLAYERS = 6;
+/** Square (boss_kill): evita post prematuro/vazio quando o +1 do monster_kill é ruído ou o PvP mal começou. */
+const SQUARE_MIN_PVP_KILLS = 5;
+const SQUARE_MIN_UNIQUE_PLAYERS = 3;
 const VORTEX_MONSTER_KILL_URL = 'https://vortexmu.net/rankings/monster_kill/load_ranking_data';
 
 function bossNpcLabel(npcId: number | null | undefined): string | null {
@@ -802,8 +805,9 @@ function shouldPostpone(
   lastKillAtMs: number | null,
   idleMinutesRequired = EVENT_IDLE_MINUTES,
 ): boolean {
-  // forceProcess só ignora idle para watchdog/manual — cron sempre respeita idle
-  if (forceProcess && trigger !== 'cron') return false;
+  // forceProcess ignora idle só em manual/watchdog. boss_kill e cron SEMPRE esperam idle
+  // (senão um +1 falso no início do evento posta ranking vazio).
+  if (forceProcess && trigger !== 'cron' && trigger !== 'boss_kill') return false;
   if (lastKillAtMs === null) return false;
 
   const idleMin = Math.floor((brtNowMs() - lastKillAtMs) / 60000);
@@ -1181,6 +1185,35 @@ Deno.serve(async (req) => {
           uniquePlayers,
           minPvpKills: WORLD_BOSS_MIN_PVP_KILLS,
           minUniquePlayers: WORLD_BOSS_MIN_UNIQUE_PLAYERS,
+        };
+      }
+    }
+
+    // Square boss_kill: não postar ranking vazio (após idle — se ainda sem volume, era ruído)
+    if (!isWorldBossEvent && eventType === 'boss_event' && body.trigger === 'boss_kill') {
+      const uniquePlayers = Object.keys(parseResult.players).length;
+      const pvpKills = Object.values(parseResult.players).reduce(
+        (sum, p) => sum + (p.kills || 0),
+        0,
+      );
+      if (pvpKills < SQUARE_MIN_PVP_KILLS || uniquePlayers < SQUARE_MIN_UNIQUE_PLAYERS) {
+        console.log(
+          `[Auto Process] Square boss_kill com PvP insuficiente ` +
+            `(kills=${pvpKills}/${SQUARE_MIN_PVP_KILLS}, players=${uniquePlayers}/${SQUARE_MIN_UNIQUE_PLAYERS}) — skip`,
+        );
+        return {
+          success: true,
+          status: 'skipped_insufficient_square_pvp',
+          message:
+            'Detecção de boss sem volume mínimo de PvP Square. Ranking não postado.',
+          matchDate,
+          matchHour,
+          eventType,
+          pvpKills,
+          uniquePlayers,
+          minPvpKills: SQUARE_MIN_PVP_KILLS,
+          minUniquePlayers: SQUARE_MIN_UNIQUE_PLAYERS,
+          idleMin,
         };
       }
     }
