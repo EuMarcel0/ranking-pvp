@@ -253,9 +253,9 @@ const BOSS_NPC_NAMES: Record<number, string> = {
  */
 const WORLD_BOSS_MIN_PVP_KILLS = 15;
 const WORLD_BOSS_MIN_UNIQUE_PLAYERS = 6;
-/** Square (boss_kill): evita post prematuro/vazio quando o +1 do monster_kill é ruído ou o PvP mal começou. */
-const SQUARE_MIN_PVP_KILLS = 5;
-const SQUARE_MIN_UNIQUE_PLAYERS = 3;
+/** Square (boss_kill): só bloqueia ranking realmente vazio (1–2 kills soltos / ruído). */
+const SQUARE_MIN_PVP_KILLS = 1;
+const SQUARE_MIN_UNIQUE_PLAYERS = 2;
 const VORTEX_MONSTER_KILL_URL = 'https://vortexmu.net/rankings/monster_kill/load_ranking_data';
 
 function bossNpcLabel(npcId: number | null | undefined): string | null {
@@ -1712,11 +1712,15 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Disparo automático do detector de boss kill (service role / anon via pg_net)
-    if (body.trigger === 'boss_kill') {
+    // Disparo automático: boss_kill, square_idle (fallback) ou throne_idle
+    if (
+      body.trigger === 'boss_kill' ||
+      body.trigger === 'square_idle' ||
+      body.trigger === 'throne_idle'
+    ) {
       const token = extractBearerToken(authHeader);
       if (!isPrivilegedApiToken(token)) {
-        console.error('[Auto Process] Unauthorized boss_kill trigger attempt');
+        console.error(`[Auto Process] Unauthorized ${body.trigger} trigger attempt`);
         return new Response(
           JSON.stringify({ error: 'Unauthorized' }),
           { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
