@@ -805,9 +805,8 @@ function shouldPostpone(
   lastKillAtMs: number | null,
   idleMinutesRequired = EVENT_IDLE_MINUTES,
 ): boolean {
-  // forceProcess ignora idle só em manual/watchdog. boss_kill e cron SEMPRE esperam idle
-  // (senão um +1 falso no início do evento posta ranking vazio).
-  if (forceProcess && trigger !== 'cron' && trigger !== 'boss_kill') return false;
+  // forceProcess ignora idle (boss_kill posta assim que o boss morre); cron sempre respeita idle
+  if (forceProcess && trigger !== 'cron') return false;
   if (lastKillAtMs === null) return false;
 
   const idleMin = Math.floor((brtNowMs() - lastKillAtMs) / 60000);
@@ -1699,7 +1698,7 @@ Deno.serve(async (req) => {
     const authHeader = req.headers.get('Authorization');
 
     // Postagem automática antiga (cron fixo / watchdog) desativada — só detect-boss-kill
-    if (body.trigger === 'cron' || body.trigger === 'watchdog') {
+    if (body.trigger === 'cron' || body.trigger === 'watchdog' || body.trigger === 'square_idle') {
       console.log(`[Auto Process] Trigger "${body.trigger}" disabled. Use detect-boss-kill.`);
       return new Response(
         JSON.stringify({
@@ -1712,12 +1711,8 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Disparo automático: boss_kill, square_idle (fallback) ou throne_idle
-    if (
-      body.trigger === 'boss_kill' ||
-      body.trigger === 'square_idle' ||
-      body.trigger === 'throne_idle'
-    ) {
+    // Disparo automático: boss_kill (Square/Selupan por NPC) ou throne_idle
+    if (body.trigger === 'boss_kill' || body.trigger === 'throne_idle') {
       const token = extractBearerToken(authHeader);
       if (!isPrivilegedApiToken(token)) {
         console.error(`[Auto Process] Unauthorized ${body.trigger} trigger attempt`);
