@@ -1012,7 +1012,7 @@ Deno.serve(async (req) => {
       for (let slotTry = 0; slotTry < 60; slotTry++) {
         const { data: existingRows } = await internalClient
           .from('pvp_matches')
-          .select('id, boss_npc_id')
+          .select('id, boss_npc_id, boss_killer, created_at')
           .eq('match_date', matchDate)
           .eq('match_hour', matchHour)
           .eq('match_minute', matchMinuteForStore)
@@ -1022,10 +1022,20 @@ Deno.serve(async (req) => {
 
         if (!existingMatch) return null;
 
-        const sameNpc =
+        let sameNpc =
           earlyBossNpcId == null ||
           existingMatch.boss_npc_id == null ||
           existingMatch.boss_npc_id === earlyBossNpcId;
+
+        // boss_kill: só substitui se for retentativa da MESMA morte; ranking de outra morte nunca é apagado
+        if (sameNpc && body.trigger === 'boss_kill') {
+          const ageMin = (Date.now() - new Date(existingMatch.created_at).getTime()) / 60000;
+          const sameKill =
+            typeof body.bossKiller === 'string' &&
+            existingMatch.boss_killer === body.bossKiller.trim() &&
+            ageMin <= 15;
+          if (!sameKill) sameNpc = false;
+        }
 
         if (forceReprocess && sameNpc) {
           console.log(`[Auto Process] forceReprocess=true: deleting existing match ${existingMatch.id} and related data`);
@@ -1103,15 +1113,62 @@ Deno.serve(async (req) => {
 
     // boss_kill Square: corta o lookback na sessão atual (gap de idle) e ancora 19/20/21/22h
     if (deferMatchIdentity) {
-      const sessionStartMs = findCurrentSquareSessionStartMs(logs);
+      let sessionStartMs = findCurrentSquareSessionStartMs(logs);
       if (sessionStartMs != null) {
         const before = logs.length;
+        const sessionParts = msToBrtHourMinute(sessionStartMs);
+        let slot = snapToSquareMatchSlot(sessionParts.hour, sessionParts.minute);
+
+        // PvP emendado entre o 1º evento do dia e o das 22h (ex.: boss 20h morreu 21:50):
+        // se o boss das 22h morrer e o anterior morreu antes das 22:00, este ranking
+        // começa depois dessa morte. Bosses do mesmo evento (BOSSx2: 966 e 968) não cortam.
+        const nowParts = msToBrtHourMinute(brtNowMs());
+        const nowMin = nowParts.hour * 60 + nowParts.minute;
+        const SECOND_EVENT_MIN = 22 * 60;
+
+        if (nowMin >= SECOND_EVENT_MIN) {
+          const { data: prevKills } = await internalClient
+            .from('boss_kill_triggers')
+            .select('triggered_at')
+            .eq('match_date', matchDate)
+            .eq('event_type', 'boss_event')
+            .not('posted_at', 'is', null)
+            .lt('triggered_at', new Date(brtNowMs() - 60_000).toISOString())
+            .order('triggered_at', { ascending: false })
+            .limit(1);
+
+          const prevKillMs = prevKills?.[0]?.triggered_at
+            ? new Date(prevKills[0].triggered_at).getTime()
+            : null;
+
+          if (prevKillMs != null && prevKillMs > sessionStartMs) {
+            const prevParts = msToBrtHourMinute(prevKillMs);
+            const prevMin = prevParts.hour * 60 + prevParts.minute;
+            if (prevMin < SECOND_EVENT_MIN) {
+              sessionStartMs = prevKillMs + 1000;
+              const cut = sessionStartMs;
+              const firstAfterCut = logs
+                .filter((log) => log.content && isPvPSquareBossEventLog(log.content))
+                .map((log) => parseLogTimestampMs(log))
+                .filter((ts): ts is number => ts != null && ts >= cut)
+                .sort((a, b) => a - b)[0];
+              const firstParts = firstAfterCut != null ? msToBrtHourMinute(firstAfterCut) : nowParts;
+              const firstMin = Math.max(firstParts.hour * 60 + firstParts.minute, SECOND_EVENT_MIN);
+              slot = snapToSquareMatchSlot(Math.floor(firstMin / 60), firstMin % 60);
+              console.log(
+                `[Auto Process] PvP emendado: boss anterior morreu ${String(prevParts.hour).padStart(2, '0')}:${String(prevParts.minute).padStart(2, '0')} ` +
+                  `→ ranking começa depois dessa morte, slot ${slot.hour}:${String(slot.minute).padStart(2, '0')}`,
+              );
+            }
+          }
+        }
+
+        const cutMs = sessionStartMs;
         logs = logs.filter((log) => {
           const ts = parseLogTimestampMs(log);
-          return ts != null && ts >= sessionStartMs;
+          return ts != null && ts >= cutMs;
         });
         const brtParts = msToBrtHourMinute(sessionStartMs);
-        const slot = snapToSquareMatchSlot(brtParts.hour, brtParts.minute);
         matchHour = slot.hour;
         matchMinuteForStore = slot.minute;
         console.log(
