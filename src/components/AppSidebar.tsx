@@ -5,7 +5,7 @@ import { useIsMobile } from '@/hooks/use-mobile';
 import {
   Swords, LogIn, LogOut, User, Crown, Skull, Users,
   Trophy, Target, Flame, Award, Menu, X, Shield,
-  ChevronsLeft, ChevronsRight, Crosshair, TrendingDown, BarChart3, Gift, Star, Activity,
+  ChevronsLeft, ChevronsRight, Crosshair, TrendingDown, BarChart3, Gift, Star, Activity, CalendarDays,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from '@/components/ui/sheet';
@@ -36,6 +36,7 @@ const navItems: NavItem[] = [
   { id: 'confrontos', label: 'Confrontos Diretos', icon: Swords },
   { id: 'killstreak', label: 'Kill Streak', icon: Swords },
   { id: 'hall-fama', label: 'Hall da Fama', icon: Star },
+  { id: 'ranking-mensal', label: 'Ranking Mensal', icon: CalendarDays, requiresAdmin: true },
   { id: 'marcos', label: 'Marcos', icon: Award },
   { id: 'conquistas', label: 'Conquistas', icon: Award },
   { id: 'analytics', label: 'Análise PvP', icon: BarChart3, requiresAuth: true },

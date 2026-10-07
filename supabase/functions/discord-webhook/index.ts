@@ -128,7 +128,69 @@ interface FogoAmigoBody {
   totals: { playerCount: number; totalFriendlyKills: number };
 }
 
-type RequestBody = GeneralRankingBody | KillStreakBody | PutinhaBody | SorteioBody | FogoAmigoBody;
+interface MonthlyPlayerEntry {
+  name: string;
+  class_name?: string;
+  class_short?: string;
+  guild?: string;
+  kills: number;
+  deaths: number;
+  kda: number;
+  matches: number;
+  eventScore: number;
+}
+
+interface MonthlyBody {
+  type: 'monthly';
+  environment: 'homolog' | 'prod';
+  dateFrom: string;
+  dateTo: string;
+  topPlayers: MonthlyPlayerEntry[];
+  topByClass: MonthlyPlayerEntry[];
+  totals: { playerCount: number; matchCount: number; kills: number };
+}
+
+type RequestBody = GeneralRankingBody | KillStreakBody | PutinhaBody | SorteioBody | FogoAmigoBody | MonthlyBody;
+
+function formatBrDate(ymd: string): string {
+  const [y, m, d] = ymd.split('-');
+  return y && m && d ? `${d}/${m}/${y}` : ymd;
+}
+
+function formatMonthlyTopTable(entries: MonthlyPlayerEntry[]): string {
+  if (!entries.length) return 'Sem dados no período';
+  const nameW = Math.max(7, ...entries.map((e) => e.name.length));
+  const width = nameW + 44;
+  let table = '🏆 TOP 5 PVP\n' + '═'.repeat(width) + '\n\n';
+  table += ' Pos  ' + 'Jogador'.padEnd(nameW + 2) + 'Sigla   K     D    KDA   Part   Score\n';
+  table += '─'.repeat(width) + '\n';
+  entries.forEach((p, i) => {
+    const pos = i === 0 ? ' 🥇  ' : i === 1 ? ' 🥈  ' : i === 2 ? ' 🥉  ' : ` #${(i + 1).toString().padStart(2)} `;
+    table +=
+      `${pos} ${p.name.padEnd(nameW + 2)}${(p.class_short || '').padEnd(6)}` +
+      `${p.kills.toString().padStart(4)}${p.deaths.toString().padStart(6)}` +
+      `${Number(p.kda).toFixed(2).padStart(7)}${p.matches.toString().padStart(6)}` +
+      `${Number(p.eventScore).toFixed(1).padStart(8)}\n`;
+  });
+  return table;
+}
+
+function formatMonthlyClassTable(entries: MonthlyPlayerEntry[]): string {
+  if (!entries.length) return 'Sem dados no período';
+  const classW = Math.max(6, ...entries.map((e) => (e.class_name || '').length));
+  const nameW = Math.max(7, ...entries.map((e) => e.name.length));
+  const width = classW + nameW + 30;
+  let table = '⚔️ MELHOR POR CLASSE\n' + '═'.repeat(width) + '\n\n';
+  table += ' ' + 'Classe'.padEnd(classW + 2) + 'Jogador'.padEnd(nameW + 2) + '   K     D    KDA   Score\n';
+  table += '─'.repeat(width) + '\n';
+  entries.forEach((p) => {
+    table +=
+      ` ${(p.class_name || '-').padEnd(classW + 2)}${p.name.padEnd(nameW + 2)}` +
+      `${p.kills.toString().padStart(4)}${p.deaths.toString().padStart(6)}` +
+      `${Number(p.kda).toFixed(2).padStart(7)}${Number(p.eventScore).toFixed(1).padStart(8)}\n`;
+  });
+  return table;
+}
 
 // Format Fogo Amigo ranking as monospaced table
 function formatFogoAmigoTable(entries: FogoAmigoEntry[]): string {
@@ -551,7 +613,39 @@ serve(async (req) => {
     // Criar embeds baseado no tipo
     let embeds: any[];
     const formData = new FormData();
-    if (rankingType === 'sorteio') {
+    if (rankingType === 'monthly') {
+      const mBody = body as MonthlyBody;
+      const period = `${formatBrDate(mBody.dateFrom)} a ${formatBrDate(mBody.dateTo)}`;
+      const champion = mBody.topPlayers[0];
+      const frontendUrl = (Deno.env.get('FRONTEND_URL') || 'https://rankingpvpboss.lovable.app').replace(/\/+$/, '');
+
+      embeds = [
+        {
+          title: '📅 Ranking Mensal — Bosses',
+          description:
+            `🗓️ **${period}**\n` +
+            `⚔️ **${mBody.totals.matchCount}** bosses • 👥 **${mBody.totals.playerCount}** jogadores • 🗡️ **${mBody.totals.kills}** kills` +
+            (champion
+              ? `\n\n👑 **CAMPEÃO DO MÊS**\n**${champion.name}**${champion.class_short ? ` (${champion.class_short})` : ''} — ` +
+                `${Number(champion.eventScore).toFixed(1)} Score • ${champion.kills}K / ${champion.deaths}D`
+              : ''),
+          color: 0xF59E0B,
+          timestamp: new Date().toISOString(),
+        },
+        {
+          description: '```\n' + formatMonthlyTopTable(mBody.topPlayers).substring(0, 4000) + '\n```',
+          color: 0xF59E0B,
+        },
+        {
+          description: '```\n' + formatMonthlyClassTable(mBody.topByClass).substring(0, 4000) + '\n```',
+          color: 0x10B981,
+        },
+        {
+          description: `🔗 **[Ver ranking completo no site](${frontendUrl}/?tab=ranking)**`,
+          color: 0x9b87f5,
+        },
+      ];
+    } else if (rankingType === 'sorteio') {
       const sorteioBody = body as SorteioBody;
       const participantList = sorteioBody.participants.map((p, i) => `${i + 1}. ${p.name} (${p.guild}) - ${p.matchCount}x`).join('\n');
       const winnerList = sorteioBody.winners.map((w, i) => {

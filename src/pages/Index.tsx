@@ -19,6 +19,7 @@ import { DatabaseManager } from '@/components/DatabaseManager';
 import { CronStatus } from '@/components/CronStatus';
 import { PvPAnalyticsDashboard } from '@/components/analytics/PvPAnalyticsDashboard';
 import { HallDaFama } from '@/components/HallDaFama';
+import { RankingMensal } from '@/components/RankingMensal';
 import { MarcosConquistas } from '@/components/MarcosConquistas';
 import { Conquistas } from '@/components/Conquistas';
 import { RankingArkaWar } from '@/components/RankingArkaWar';
@@ -151,6 +152,9 @@ const Index = () => {
         return <PvPAnalyticsDashboard />;
       case 'hall-fama':
         return <HallDaFama />;
+      case 'ranking-mensal':
+        if (!isAdmin) return null;
+        return <RankingMensal />;
       case 'marcos':
         return <MarcosConquistas />;
       case 'conquistas':
