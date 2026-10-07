@@ -148,6 +148,7 @@ interface MonthlyBody {
   topPlayers: MonthlyPlayerEntry[];
   topByClass: MonthlyPlayerEntry[];
   totals: { playerCount: number; matchCount: number; kills: number };
+  classFilter?: { short: string; label: string } | null;
 }
 
 type RequestBody = GeneralRankingBody | KillStreakBody | PutinhaBody | SorteioBody | FogoAmigoBody | MonthlyBody;
@@ -157,11 +158,11 @@ function formatBrDate(ymd: string): string {
   return y && m && d ? `${d}/${m}/${y}` : ymd;
 }
 
-function formatMonthlyTopTable(entries: MonthlyPlayerEntry[]): string {
+function formatMonthlyTopTable(entries: MonthlyPlayerEntry[], heading = 'TOP 5 PVP'): string {
   if (!entries.length) return 'Sem dados no período';
   const nameW = Math.max(7, ...entries.map((e) => e.name.length));
   const width = nameW + 44;
-  let table = '🏆 TOP 5 PVP\n' + '═'.repeat(width) + '\n\n';
+  let table = `🏆 ${heading}\n` + '═'.repeat(width) + '\n\n';
   table += ' Pos  ' + 'Jogador'.padEnd(nameW + 2) + 'Sigla   K     D    KDA   Part   Score\n';
   table += '─'.repeat(width) + '\n';
   entries.forEach((p, i) => {
@@ -618,28 +619,31 @@ serve(async (req) => {
       const period = `${formatBrDate(mBody.dateFrom)} a ${formatBrDate(mBody.dateTo)}`;
       const champion = mBody.topPlayers[0];
       const frontendUrl = (Deno.env.get('FRONTEND_URL') || 'https://rankingpvpboss.lovable.app').replace(/\/+$/, '');
+      const cf = mBody.classFilter;
 
       embeds = [
         {
-          title: '📅 Ranking Mensal — Bosses',
+          title: cf ? `📅 Ranking Mensal — Bosses • Melhores ${cf.label}` : '📅 Ranking Mensal — Bosses',
           description:
             `🗓️ **${period}**\n` +
             `⚔️ **${mBody.totals.matchCount}** bosses • 👥 **${mBody.totals.playerCount}** jogadores • 🗡️ **${mBody.totals.kills}** kills` +
             (champion
-              ? `\n\n👑 **CAMPEÃO DO MÊS**\n**${champion.name}**${champion.class_short ? ` (${champion.class_short})` : ''} — ` +
+              ? `\n\n👑 **${cf ? `MELHOR ${cf.short} DO MÊS` : 'CAMPEÃO DO MÊS'}**\n**${champion.name}**${champion.class_short ? ` (${champion.class_short})` : ''} — ` +
                 `${Number(champion.eventScore).toFixed(1)} Score • ${champion.kills}K / ${champion.deaths}D`
               : ''),
           color: 0xF59E0B,
           timestamp: new Date().toISOString(),
         },
         {
-          description: '```\n' + formatMonthlyTopTable(mBody.topPlayers).substring(0, 4000) + '\n```',
+          description: '```\n' + formatMonthlyTopTable(mBody.topPlayers, cf ? `TOP ${cf.short}` : undefined).substring(0, 4000) + '\n```',
           color: 0xF59E0B,
         },
-        {
-          description: '```\n' + formatMonthlyClassTable(mBody.topByClass).substring(0, 4000) + '\n```',
-          color: 0x10B981,
-        },
+        ...(mBody.topByClass.length
+          ? [{
+              description: '```\n' + formatMonthlyClassTable(mBody.topByClass).substring(0, 4000) + '\n```',
+              color: 0x10B981,
+            }]
+          : []),
         {
           description: `🔗 **[Ver ranking completo no site](${frontendUrl}/?tab=ranking)**`,
           color: 0x9b87f5,

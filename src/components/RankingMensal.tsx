@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { format, startOfMonth, endOfMonth, subMonths } from 'date-fns';
 import { CalendarDays, Crown, Loader2, Send, Swords, Trophy, Users } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
@@ -10,6 +10,8 @@ import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { getClassShort } from '@/lib/classShortMap';
 
 interface MonthlyEntry {
   name: string;
@@ -29,9 +31,19 @@ interface MonthlyPreview {
   topPlayers: MonthlyEntry[];
   topByClass: MonthlyEntry[];
   totals: { playerCount: number; matchCount: number; kills: number };
+  classFilter: { short: string; label: string } | null;
+}
+
+interface MonthlyData {
+  dateFrom: string;
+  dateTo: string;
+  allPlayers: MonthlyEntry[];
+  bestByClass: MonthlyEntry[];
+  matchCount: number;
 }
 
 const TOP_LIMIT = 5;
+const ALL_CLASSES = 'all';
 
 function formatBr(ymd: string): string {
   const [y, m, d] = ymd.split('-');
@@ -42,7 +54,8 @@ export const RankingMensal = () => {
   const lastMonth = subMonths(new Date(), 1);
   const [dateFrom, setDateFrom] = useState(format(startOfMonth(lastMonth), 'yyyy-MM-dd'));
   const [dateTo, setDateTo] = useState(format(endOfMonth(lastMonth), 'yyyy-MM-dd'));
-  const [preview, setPreview] = useState<MonthlyPreview | null>(null);
+  const [data, setData] = useState<MonthlyData | null>(null);
+  const [classFilter, setClassFilter] = useState<string>(ALL_CLASSES);
   const [loading, setLoading] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
   const [environment, setEnvironment] = useState<'homolog' | 'prod'>('homolog');
@@ -86,7 +99,7 @@ export const RankingMensal = () => {
       const allPlayers: MonthlyEntry[] = geral.map((r) => ({
         name: r.player_name,
         class_name: r.player_class || undefined,
-        class_short: r.player_class_short || undefined,
+        class_short: r.player_class_short || getClassShort(r.player_class) || undefined,
         guild: r.player_guild || undefined,
         kills: Number(r.total_kills),
         deaths: Number(r.total_deaths),
@@ -95,16 +108,12 @@ export const RankingMensal = () => {
         eventScore: Number(r.event_score),
       }));
 
-      const topPlayers = [...allPlayers]
-        .sort((a, b) => b.eventScore - a.eventScore)
-        .slice(0, TOP_LIMIT);
-
-      const topByClass: MonthlyEntry[] = ((classRes.data as any[]) || [])
+      const bestByClass: MonthlyEntry[] = ((classRes.data as any[]) || [])
         .filter((r) => r.is_best)
         .map((r) => ({
           name: r.player_name,
           class_name: r.class_name,
-          class_short: byName.get(r.player_name)?.player_class_short || undefined,
+          class_short: byName.get(r.player_name)?.player_class_short || getClassShort(r.class_name) || undefined,
           kills: Number(r.total_kills),
           deaths: Number(r.total_deaths),
           kda: Number(r.total_kda),
@@ -114,23 +123,58 @@ export const RankingMensal = () => {
         .filter((p) => p.kills > 0)
         .sort((a, b) => b.eventScore - a.eventScore);
 
-      setPreview({
+      setData({
         dateFrom,
         dateTo,
-        topPlayers,
-        topByClass,
-        totals: {
-          playerCount: allPlayers.length,
-          matchCount: matchesRes.count ?? 0,
-          kills: allPlayers.reduce((sum, p) => sum + p.kills, 0),
-        },
+        allPlayers,
+        bestByClass,
+        matchCount: matchesRes.count ?? 0,
       });
+      if (classFilter !== ALL_CLASSES && !allPlayers.some((p) => p.class_short === classFilter)) {
+        setClassFilter(ALL_CLASSES);
+      }
     } catch (e: any) {
       toast({ title: 'Erro ao gerar ranking', description: e.message, variant: 'destructive' });
     } finally {
       setLoading(false);
     }
   };
+
+  const classOptions = useMemo(() => {
+    if (!data) return [];
+    const byShort = new Map<string, Set<string>>();
+    data.allPlayers.forEach((p) => {
+      if (!p.class_short) return;
+      if (!byShort.has(p.class_short)) byShort.set(p.class_short, new Set());
+      if (p.class_name) byShort.get(p.class_short)!.add(p.class_name);
+    });
+    return [...byShort.entries()]
+      .map(([short, names]) => ({ short, label: `${short} — ${[...names].sort().join(', ')}` }))
+      .sort((a, b) => a.short.localeCompare(b.short));
+  }, [data]);
+
+  const preview = useMemo<MonthlyPreview | null>(() => {
+    if (!data) return null;
+    const isAll = classFilter === ALL_CLASSES;
+    const players = isAll ? data.allPlayers : data.allPlayers.filter((p) => p.class_short === classFilter);
+    const topPlayers = [...players]
+      .filter((p) => isAll || p.kills > 0)
+      .sort((a, b) => b.eventScore - a.eventScore)
+      .slice(0, TOP_LIMIT);
+
+    return {
+      dateFrom: data.dateFrom,
+      dateTo: data.dateTo,
+      topPlayers,
+      topByClass: isAll ? data.bestByClass : [],
+      totals: {
+        playerCount: players.length,
+        matchCount: data.matchCount,
+        kills: players.reduce((sum, p) => sum + p.kills, 0),
+      },
+      classFilter: isAll ? null : { short: classFilter, label: classFilter },
+    };
+  }, [data, classFilter]);
 
   const publish = async () => {
     if (!preview) return;
@@ -163,6 +207,7 @@ export const RankingMensal = () => {
         </div>
         <p className="text-sm text-muted-foreground mb-4">
           Considera apenas partidas de Boss Diário. Top 5 do PvP e o melhor jogador de cada classe no período.
+          Após gerar, filtre por classe para ver os melhores de uma classe específica.
         </p>
 
         <div className="flex flex-wrap items-end gap-4">
@@ -178,6 +223,20 @@ export const RankingMensal = () => {
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trophy className="w-4 h-4" />}
             Gerar
           </Button>
+          <div className="space-y-1">
+            <Label>Classe</Label>
+            <Select value={classFilter} onValueChange={setClassFilter} disabled={!data}>
+              <SelectTrigger className="w-64">
+                <SelectValue placeholder="Todas as classes" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL_CLASSES}>Todas as classes</SelectItem>
+                {classOptions.map((c) => (
+                  <SelectItem key={c.short} value={c.short}>{c.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <Button
             variant="outline"
             onClick={() => setShowPublish(true)}
@@ -205,7 +264,7 @@ export const RankingMensal = () => {
               <p className="pt-2 flex items-center gap-2">
                 <Crown className="w-5 h-5 text-primary" />
                 <span>
-                  Campeão do mês: <strong>{preview.topPlayers[0].name}</strong>{' '}
+                  {preview.classFilter ? `Melhor ${preview.classFilter.short} do mês` : 'Campeão do mês'}: <strong>{preview.topPlayers[0].name}</strong>{' '}
                   ({preview.topPlayers[0].eventScore.toFixed(1)} score)
                 </span>
               </p>
@@ -213,9 +272,13 @@ export const RankingMensal = () => {
           </Card>
 
           <Card className="p-6">
-            <h3 className="text-xl font-bold mb-4">🏆 Top 5 do PvP</h3>
+            <h3 className="text-xl font-bold mb-4">
+              🏆 {preview.classFilter ? `Top 5 ${preview.classFilter.short}` : 'Top 5 do PvP'}
+            </h3>
             {preview.topPlayers.length === 0 ? (
-              <p className="text-center text-muted-foreground py-6">Nenhum boss no período.</p>
+              <p className="text-center text-muted-foreground py-6">
+                {preview.classFilter ? 'Nenhum jogador desta classe com kills no período.' : 'Nenhum boss no período.'}
+              </p>
             ) : (
               <div className="overflow-x-auto">
                 <Table>
@@ -252,6 +315,7 @@ export const RankingMensal = () => {
             )}
           </Card>
 
+          {!preview.classFilter && (
           <Card className="p-6">
             <h3 className="text-xl font-bold mb-4">⚔️ Melhor de cada classe</h3>
             {preview.topByClass.length === 0 ? (
@@ -287,6 +351,7 @@ export const RankingMensal = () => {
               </div>
             )}
           </Card>
+          )}
         </>
       )}
 
@@ -295,7 +360,9 @@ export const RankingMensal = () => {
           <DialogHeader>
             <DialogTitle>Publicar Ranking Mensal</DialogTitle>
             <DialogDescription>
-              {preview && `${formatBr(preview.dateFrom)} a ${formatBr(preview.dateTo)} • Top 5 + melhor de cada classe`}
+              {preview &&
+                `${formatBr(preview.dateFrom)} a ${formatBr(preview.dateTo)} • ` +
+                  (preview.classFilter ? `Top 5 ${preview.classFilter.short}` : 'Top 5 + melhor de cada classe')}
             </DialogDescription>
           </DialogHeader>
 
